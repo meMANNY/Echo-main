@@ -8,3 +8,4 @@ build/
 Pipfile.lock
 .Drizzle/
 .Echo/
+.venv/
