@@ -1,0 +1,813 @@
+================================================================================
+              PHASE 3 — SERVER DEVELOPMENT: DETAILED PLAN
+================================================================================
+                         Generated: 2026-05-19
+================================================================================
+
+CONTEXT
+-------
+Phase 2 will give you a clean, reusable wire protocol (protocol.py with
+build_header / send_message / receive_message). Phase 3 is where that
+protocol gets put to work: a single, central server process that
+clients connect to for registration, status, share-folder indexing, and
+search.
+
+The server is the ONLY centralized piece of Echo. Once a client knows
+another peer's IP (via the server), the actual file transfer and
+chat happen directly peer-to-peer with no server involvement. So the
+server is small but load-bearing: if it's down, nobody can find anyone.
+
+Phase 3 has three sub-phases (mirrors your PROGRESS_AND_TASKS.txt):
+  3.1 Server Core      — networking, registration, state, main loop
+  3.2 File Index       — TinyDB-backed storage for share folder trees
+  3.3 Server Features  — connection lifecycle, logging, error handling
+
+
+WHY THIS PHASE MATTERS
+----------------------
+Two reasons beyond "we need a server":
+
+1. It's where you'll learn I/O multiplexing — handling many TCP
+   connections in a single thread using select(). This is one of the
+   foundational systems-programming patterns and it generalizes to
+   poll/epoll/kqueue, libuv (Node.js), and asyncio. Worth understanding
+   deeply.
+
+2. It's where the "two-state" model of your app comes into focus —
+   unregistered sockets vs. registered users — and how authentication-
+   style gates work in stateful protocols.
+
+
+================================================================================
+PHASE 3.1 — SERVER CORE
+================================================================================
+
+GOAL: A server.py that listens on SERVER_RECV_PORT, accepts incoming
+TCP connections, dispatches messages by HeaderCode, maintains who is
+online, and never blocks on one slow client.
+
+
+--------------------------------------------------------------------------------
+STEP 3.1.1 — Install dependencies
+--------------------------------------------------------------------------------
+
+  pipenv install tinydb
+
+That's it. select, socket, logging, datetime are all stdlib.
+
+Why TinyDB?
+  - File-backed JSON, schema-flexible, single-process.
+  - Perfect for storing nested dicts (your DirData trees) without an
+    ORM or schema definitions.
+  - Drizzle uses it; matching the reference reduces friction.
+
+When you'd prefer SQLite instead:
+  - Concurrent reads from multiple processes.
+  - Indexed queries on file paths or hashes.
+  - You need transactions.
+  - Echo is single-process and queries are full-table-scan anyway, so
+    TinyDB is the right call here.
+
+
+--------------------------------------------------------------------------------
+STEP 3.1.2 — Server bootstrap (top of server/server.py)
+--------------------------------------------------------------------------------
+
+Pattern (read top-down):
+
+  1. Imports — stdlib (logging, select, socket, sys, time, datetime,
+     pathlib), third-party (msgpack, tinydb), and your utils.
+
+  2. Get own IP via get_self_ip() from socket_functions.py. Print it
+     loudly to the console — the user will need it to point clients at.
+
+  3. Create app dirs: ~/.Echo/, ~/.Echo/logs/, ~/.Echo/db/.
+
+  4. Configure logging — TWO handlers: FileHandler writing to
+     ~/.Echo/logs/server_<timestamp>.log, and StreamHandler to stdout.
+     This is a useful pattern; lets you tail logs live AND keep
+     history.
+
+  5. Open TinyDB at ~/.Echo/db/db.json (one shared DB instance).
+
+  6. Create the listening socket: socket.AF_INET + socket.SOCK_STREAM.
+
+  7. Set socket options (see warning below):
+       SO_REUSEADDR  — lets you restart the server immediately after
+                       Ctrl+C without "Address already in use".
+       TCP_NODELAY   — disables Nagle's algorithm. Server replies are
+                       small; we want them sent immediately, not
+                       buffered until the kernel decides.
+       IP_TOS        — sets Type-of-Service bits requesting low-delay
+                       + high-throughput routing. Modern kernels and
+                       most LAN switches ignore this; harmless.
+       SO_PRIORITY   — Linux-only. Sets the socket buffer priority
+                       at the kernel level. Wrap in try/except so
+                       Windows doesn't crash.
+
+  8. Bind to (IP, SERVER_RECV_PORT). Listen with a backlog of 5.
+
+WINDOWS NOTE: socket.SO_PRIORITY does not exist on Windows. If you
+copy Drizzle's setsockopt block verbatim it will throw
+AttributeError. Either guard it with hasattr(socket, "SO_PRIORITY")
+or skip it entirely — the LAN doesn't care about priority bits.
+
+
+--------------------------------------------------------------------------------
+STEP 3.1.3 — Connection state model (the three dicts)
+--------------------------------------------------------------------------------
+
+The whole server's runtime state is three dicts plus one list:
+
+  sockets_list: list[socket.socket]
+    Every socket select() needs to monitor: the listener + every
+    connected client. The listener is always element [0].
+
+  uname_to_ip: dict[str, str]
+    "alice" -> "192.168.1.7". Built when a user registers. Used by
+    REQUEST_IP and to detect duplicate registrations.
+
+  ip_to_uname: dict[str, str]
+    Inverse of uname_to_ip. Used by every other handler to look up
+    "who is this socket talking?" since you can only get the peer's
+    IP from getpeername(), not their username.
+
+  uname_to_status: dict[str, float]
+    Username -> unix timestamp of last activity. Updated on every
+    request from that user. Drives the HEARTBEAT_REQUEST response.
+
+CRITICAL INVARIANT: these three dicts must stay consistent. Every
+time you add/remove from one, update the others. Easiest way: a
+small helper register_user(uname, ip) and unregister_user(uname)
+that mutate all three. Drizzle does this inline and it's error-prone
+(see the duplicated cleanup code in OSError + RequestException
+handlers, server.py:414-433). YOU CAN DO BETTER (see "Improvements"
+section below).
+
+These dicts are in-memory ONLY in Drizzle. If the server restarts,
+all registrations are lost and clients have to re-register. That's
+acceptable for Echo too, but flag it in the README as a limitation.
+A nice Phase 7 enhancement is persisting uname_to_ip to disk.
+
+
+--------------------------------------------------------------------------------
+STEP 3.1.4 — The select() main loop
+--------------------------------------------------------------------------------
+
+This is THE core idea of the server. Read it, internalize it, then
+write it from scratch without looking at Drizzle.
+
+  while True:
+      readable, _, errored = select.select(
+          sockets_list, [], sockets_list, 0.1
+      )
+      for notified_socket in readable:
+          read_handler(notified_socket)
+
+What select() does:
+  - You pass three lists: sockets to check for readability, writability,
+    errors. (Most servers care about reads.)
+  - It blocks until at least one socket is ready, or until the timeout
+    (0.1s here) expires.
+  - Returns the subset of sockets that ARE ready.
+
+Why this beats one-thread-per-client:
+  - 100 connected clients = 1 thread, not 100. No context-switch tax.
+  - No locking around shared state (uname_to_ip etc.) because only
+    one socket is processed at a time.
+  - No GIL contention.
+
+Why this beats async/await for THIS use case:
+  - select() is more transparent — you can see exactly what's
+    happening in the loop. Asyncio hides it behind await.
+  - For a learning project, select() teaches the mechanics.
+  - Easy to add asyncio later if you decide to scale (which you
+    won't, because LAN file sharing).
+
+The 0.1s timeout is there so the loop also services periodic tasks
+(future heartbeat sweep, stats logging) without busy-waiting. If you
+don't have those tasks yet, you can pass None and block forever
+until I/O.
+
+
+--------------------------------------------------------------------------------
+STEP 3.1.5 — read_handler: dispatching by message type
+--------------------------------------------------------------------------------
+
+Two cases inside read_handler(notified_socket):
+
+  Case A: notified_socket is the listener (server_socket).
+    This means a new client is calling. Do:
+      conn, addr = server_socket.accept()
+      sockets_list.append(conn)
+    DO NOT call receive_message() here — the client hasn't sent
+    anything yet, you just accepted the TCP handshake. The next
+    iteration of select() will fire when their first message
+    arrives.
+
+  Case B: notified_socket is a client socket.
+    Call receive_message(notified_socket) (from protocol.py).
+    Two sub-cases based on result:
+
+      B1. Sender is not yet registered (ip_to_uname.get(addr) is None):
+          - First message MUST be NEW_CONNECTION. Anything else =>
+            raise RequestException(UNAUTHORIZED).
+          - On NEW_CONNECTION: validate username uniqueness, populate
+            all three dicts, send back a NEW_CONNECTION ack.
+
+      B2. Sender is registered:
+          - match request["type"]: dispatch to the handler for each
+            HeaderCode. (See section 3.1.6 for what each handler does.)
+          - On any RequestException raised by a handler: catch it,
+            serialize via msgpack with RequestException.to_dict, send
+            it back to the client as a "e" (ERROR) message.
+
+This is your authentication gate. It's lightweight (no passwords,
+just "have you said hello yet?") but it does enforce that nobody
+can spoof requests on behalf of others on the LAN — your IP is
+your identity.
+
+
+--------------------------------------------------------------------------------
+STEP 3.1.6 — Per-HeaderCode handlers (server side)
+--------------------------------------------------------------------------------
+
+You'll handle these in your match block:
+
+  NEW_CONNECTION:
+    Body = username bytes. Look up in uname_to_ip:
+      - If absent => register (update all three dicts), ack with b"n".
+      - If present and IP matches => raise BAD_REQUEST (re-registration).
+      - If present and IP differs => raise USER_EXISTS.
+
+  REQUEST_IP:
+    Body = target username. Look up in uname_to_ip. Edge case: caller
+    is asking for their own IP — return BAD_REQUEST. Otherwise send
+    back the IP as a REQUEST_IP-typed response.
+
+  REQUEST_UNAME:
+    Body = target IP. Look up in ip_to_uname. Same self-query check.
+
+  SHARE_DATA:
+    Body = msgpack'd list[DirData]. Unpack, store in TinyDB via upsert
+    (insert-or-update keyed by username). Ack with type-only response.
+
+  FILE_BROWSE:
+    Body = target username. Confirm target exists, fetch their share
+    tree from TinyDB, msgpack and return.
+
+  FILE_SEARCH:
+    Body = query string. Iterate every user in TinyDB except the caller,
+    run helpers.item_search() on their tree, collect results, msgpack
+    and return.
+
+  UPDATE_HASH:
+    Body = msgpack'd UpdateHashParams. Fetch user's tree from TinyDB,
+    use helpers.update_file_hash() to mutate, write back. No response
+    body required (but send the ack type byte for consistency — see
+    Phase 2 plan, ack format issue).
+
+  HEARTBEAT_REQUEST:
+    Update uname_to_status[caller] = time.time(). Build a dict of all
+    OTHER users' last-seen timestamps. msgpack and return.
+
+  ERROR:
+    Client is telling YOU something went wrong. Just log and continue
+    (or treat as disconnect signal if severe).
+
+Each handler should be 5-20 lines. If one starts ballooning, factor
+out into a helper function. The "match request['type']" block in
+Drizzle is the longest in the file (~190 lines) and a good candidate
+to break up.
+
+
+================================================================================
+PHASE 3.2 — FILE INDEX
+================================================================================
+
+GOAL: Per-user share folder data is persisted across server runs and
+queryable for browse + search.
+
+
+--------------------------------------------------------------------------------
+STEP 3.2.1 — TinyDB setup
+--------------------------------------------------------------------------------
+
+Single DB instance, opened once at startup:
+  echo_db = TinyDB(f"{Path.home()}/.Echo/db/db.json")
+
+Schema is informal (no enforcement):
+  {
+    "uname": "alice",
+    "share": [DirData, DirData, ...]   # alice's top-level shared items
+  }
+
+Use Query() from tinydb for lookups:
+  User = Query()
+  echo_db.search(User.uname == "alice")
+  echo_db.upsert({"uname": ..., "share": ...}, User.uname == "alice")
+
+That's 95% of the database surface area.
+
+
+--------------------------------------------------------------------------------
+STEP 3.2.2 — Storing share data
+--------------------------------------------------------------------------------
+
+On SHARE_DATA arrival:
+  1. msgpack.unpackb the body into list[DirData].
+  2. Look up caller's username from ip_to_uname.
+  3. echo_db.upsert({"uname": uname, "share": share_data}, User.uname == uname)
+  4. Send ack.
+
+Validation worth adding (Drizzle skips this):
+  - Reject if share_data is not a list.
+  - Reject if any DirData entry has a path starting with ".." or
+    containing absolute paths (path traversal guard).
+  - Reject if total tree size > some sanity cap (say, 10MB of JSON).
+  See "Improvements" section.
+
+
+--------------------------------------------------------------------------------
+STEP 3.2.3 — Browse queries
+--------------------------------------------------------------------------------
+
+FILE_BROWSE is just a wrapper over a single DB lookup:
+  echo_db.search(User.uname == target_uname)
+  → returns the matching documents (usually one) wrapped in a list.
+
+msgpack the list, send back. Trivial. The interesting bit is the
+edge case: target user doesn't exist (NOT_FOUND) vs. target has no
+share data uploaded yet (empty list — should return the empty list
+gracefully, NOT raise).
+
+
+--------------------------------------------------------------------------------
+STEP 3.2.4 — Search implementation
+--------------------------------------------------------------------------------
+
+FILE_SEARCH is the only handler that touches every user's data:
+
+  for user_doc in echo_db.all():
+      if user_doc["uname"] == caller_uname: continue  # skip self
+      results = []
+      item_search(user_doc["share"], results, query.lower(), user_doc["uname"])
+      all_results.extend(results)
+
+Then msgpack(all_results) and send back.
+
+This is O(N users × M files per user) per query. For Echo's LAN
+scale (< 50 users, < 10k files each) that's fine. If you ever
+needed to scale, the right move is a flat inverted index updated
+on SHARE_DATA — but YAGNI for now.
+
+
+--------------------------------------------------------------------------------
+STEP 3.2.5 — Hash updates
+--------------------------------------------------------------------------------
+
+UPDATE_HASH:
+  1. Unpack UpdateHashParams (filepath, hash).
+  2. Look up user's share data.
+  3. Call helpers.update_file_hash(share, filepath, new_hash) to
+     mutate in place.
+  4. echo_db.update({"share": share}, User.uname == uname) to persist.
+
+Why does this exist?
+  - When a client first scans its share folder, it doesn't compute
+    hashes (would be slow). It sends share data with hash=None.
+  - Hashes are computed lazily when someone tries to download.
+  - The downloader gets the hash, the uploader's server-side record
+    is updated so future downloaders don't have to recompute.
+
+This is the protocol bit most likely to confuse you. Re-read it.
+
+
+================================================================================
+PHASE 3.3 — SERVER FEATURES
+================================================================================
+
+GOAL: The server stays up, recovers cleanly from disconnects, logs
+useful things, and reports errors back to clients without crashing.
+
+
+--------------------------------------------------------------------------------
+STEP 3.3.1 — Connection lifecycle
+--------------------------------------------------------------------------------
+
+Three events in a connection's life:
+
+  1. Accept: server_socket.accept() returns a new socket. Append to
+     sockets_list. DO NOT register the user yet — they haven't told
+     you their name.
+
+  2. First message (NEW_CONNECTION): populate uname_to_ip,
+     ip_to_uname, uname_to_status. From this point on the socket is
+     "authenticated".
+
+  3. Subsequent messages: dispatch via handlers, update
+     uname_to_status timestamp on every request.
+
+The transition from #1 to #2 is enforced by the "is this socket
+registered yet?" check at the top of read_handler. Any non-
+NEW_CONNECTION message from an unregistered socket = UNAUTHORIZED
+error response (and you should probably also close the socket —
+Drizzle doesn't, which means a misbehaving client can hammer you
+indefinitely).
+
+
+--------------------------------------------------------------------------------
+STEP 3.3.2 — Disconnect handling
+--------------------------------------------------------------------------------
+
+Two ways a client can disconnect:
+
+  Graceful: client sends FIN (calls .close()). Next recv() on the
+            server side returns b"" (empty bytes). receive_message()
+            should detect this and raise RequestException(DISCONNECT).
+
+  Ungraceful: network drops, client crashes, etc. Next send() raises
+              OSError (often "Broken pipe" or "Connection reset by
+              peer"). Next recv() may return b"" or raise.
+
+Handler at the bottom of read_handler must cover BOTH:
+
+  except RequestException as e:
+      if e.code == ExceptionCode.DISCONNECT:
+          cleanup(notified_socket)
+      else:
+          send_error_to_client(notified_socket, e)
+  except OSError:
+      cleanup(notified_socket)
+
+cleanup() must:
+  - Remove from sockets_list.
+  - Pop from ip_to_uname (using getpeername()[0] BEFORE closing).
+  - Pop from uname_to_ip and uname_to_status.
+  - notified_socket.close().
+
+Drizzle has a subtle bug: it calls getpeername() AFTER OSError has
+already torn down the socket, which can itself raise OSError. Be
+careful: get the addr at the TOP of read_handler and stash it in a
+local variable so cleanup can use it.
+
+
+--------------------------------------------------------------------------------
+STEP 3.3.3 — Logging
+--------------------------------------------------------------------------------
+
+Use Python's logging module, not print(). At server startup:
+
+  logging.basicConfig(
+      level=logging.DEBUG,
+      format="%(asctime)s [%(levelname)s] %(message)s",
+      handlers=[
+          logging.FileHandler(f"~/.Echo/logs/server_{datetime.now():%d-%m-%Y_%H-%M-%S}.log"),
+          logging.StreamHandler(sys.stdout),
+      ],
+  )
+
+What to log at each level:
+
+  DEBUG: every message received (type + peer), every DB query, every
+         dispatch. Verbose.
+
+  INFO:  registrations, disconnects, server startup/shutdown,
+         search/browse summaries. Things you'd want in a clean trace.
+
+  WARNING: validation failures (path traversal attempt, oversized
+           share data, malformed msgpack).
+
+  ERROR: unhandled exceptions, OS errors, DB write failures.
+
+  CRITICAL: things that mean the server is going down.
+
+Drizzle logs everything at DEBUG which is too noisy. Tier your
+log levels.
+
+
+--------------------------------------------------------------------------------
+STEP 3.3.4 — Error responses
+--------------------------------------------------------------------------------
+
+Every RequestException raised inside a handler must round-trip back
+to the client as a wire-format ERROR message. Standard pattern:
+
+  exc_bytes = msgpack.packb(e, default=RequestException.to_dict, use_bin_type=True)
+  send_message(sock, HeaderCode.ERROR, exc_bytes)
+
+If you wrote send_error() in your Phase 2 protocol.py (which the
+plan recommended), this is a one-liner here.
+
+The client's receive_message() will detect type="e" and re-raise
+the RequestException on the client side. Symmetric, clean.
+
+DO NOT silently swallow exceptions in the server. Either:
+  - It's a legitimate error → send it to the client.
+  - It's a bug → log it, then either send a generic
+    RequestException(BAD_REQUEST) or close the connection. Never just
+    log-and-continue without telling the client something.
+
+
+================================================================================
+IMPORTANT CONCEPTS TO LEARN IN THIS PHASE
+================================================================================
+
+These are general systems-programming concepts. The server is a great
+vehicle for picking them up.
+
+  1. I/O MULTIPLEXING (select / poll / epoll / kqueue)
+     The idea that one thread can monitor many file descriptors. The
+     three Unix calls form an evolution:
+       select (1983) — fixed-size FD set (1024 max on Linux), O(N)
+                       scan, oldest, most portable.
+       poll   (1986) — no FD limit, still O(N) scan, slightly nicer
+                       API.
+       epoll  (2002, Linux) — O(1) lookup, scales to millions of FDs.
+       kqueue (1999, BSD)  — BSD equivalent of epoll.
+     Echo uses select() because it's simple and Echo has < 100 users.
+     Production servers use epoll/kqueue (or asyncio, which wraps
+     them).
+
+  2. THE C10K PROBLEM
+     Why thread-per-connection servers fall over at ~10,000 concurrent
+     clients (memory + context switches). Why nginx, Node.js, asyncio
+     all switched to event loops. Echo never hits this but it's the
+     "why" behind your design.
+
+  3. TCP CONNECTION LIFECYCLE
+     The three-way handshake (SYN, SYN-ACK, ACK), the four-way close
+     (FIN, ACK, FIN, ACK), and TIME_WAIT. SO_REUSEADDR exists
+     specifically to skip TIME_WAIT when restarting servers.
+
+  4. NAGLE'S ALGORITHM
+     TCP buffers small writes hoping to coalesce them into a larger
+     packet (saves bandwidth, adds latency). TCP_NODELAY disables it.
+     Worth understanding: when do you want it on, when off? (On: bulk
+     transfers. Off: interactive request/response.)
+
+  5. DOCUMENT DATABASES vs. RELATIONAL
+     TinyDB stores JSON-like documents. SQLite stores typed rows in
+     tables. Trade-offs: flexibility vs. constraints, scan vs. index,
+     simple vs. transactional. Understand when each fits.
+
+  6. STATE MACHINES
+     Your server is implicitly a state machine: socket is either
+     UNREGISTERED or REGISTERED. The "first message must be
+     NEW_CONNECTION" rule is a state-transition rule. Bigger systems
+     have explicit state-machine libraries (e.g., python-statemachine,
+     XState) — overkill here but the concept is everywhere.
+
+  7. HEARTBEAT / KEEPALIVE PATTERNS
+     Application-level heartbeats (HEARTBEAT_REQUEST every 5s) vs.
+     TCP keepalives (SO_KEEPALIVE — kernel-level, configurable). When
+     to use each? App-level when you need to also fetch state (like
+     online-list). TCP-level when you just need to detect dead peers.
+
+  8. PYTHON's match/case (PEP 634, Python 3.10+)
+     Pattern matching is more than just a switch. Worth learning the
+     full feature: capture patterns, class patterns, sequence
+     patterns, guard clauses. Drizzle only scratches the surface.
+
+  9. LOGGING — handlers, formatters, filters
+     The Python logging module is more powerful than people use it
+     for. Worth learning: RotatingFileHandler (auto-rotate logs),
+     QueueHandler (non-blocking logging for high-throughput servers),
+     custom Filters (e.g., inject username into every log line).
+
+ 10. EXCEPTION-DRIVEN CONTROL FLOW
+     Drizzle's server raises RequestException liberally inside handlers
+     and catches once at the top of read_handler. Some folks find this
+     "ugly"; in fact it's the cleanest way to handle nested validation
+     failures without deep nested ifs. Worth understanding the pattern.
+
+ 11. THE TWO-PROCESS DEBUGGING DANCE
+     Server in one terminal, client in another. Tail server logs in a
+     third. Once you have it working, you'll want a fourth pane for a
+     packet capture (wireshark or tcpdump) to verify the wire format.
+     Get comfortable with multi-window dev now; you'll need it for
+     Phase 4.
+
+ 12. GRACEFUL SHUTDOWN
+     What happens if you Ctrl+C the server? Drizzle: dies hard, leaves
+     sockets in TIME_WAIT, drops state. Better: install a SIGINT
+     handler that closes all sockets, flushes TinyDB, logs "shutting
+     down", and exits cleanly. Five lines of code, surprisingly
+     satisfying.
+
+
+================================================================================
+IMPROVEMENTS YOU CAN ADD BEYOND DRIZZLE
+================================================================================
+
+Drizzle is a reference, not a ceiling. These are real improvements
+you could implement in Phase 3 (mostly small, all educational):
+
+  A. CONSOLIDATED USER STATE
+     Replace the three dicts (uname_to_ip, ip_to_uname,
+     uname_to_status) with a single User dataclass + dict:
+       @dataclass
+       class UserState:
+           uname: str
+           ip: str
+           socket: socket.socket
+           last_seen: float
+       users: dict[str, UserState] = {}      # by uname
+       sockets_to_users: dict[socket.socket, UserState] = {}  # for cleanup
+     Now consistency is automatic; you can't forget to update one of
+     three dicts. This is THE biggest design win available in Phase 3.
+
+  B. CENTRALIZED register_user() / unregister_user() HELPERS
+     Drizzle inlines registration logic in two places and disconnect
+     logic in three places. Both have copy-paste bugs. Factor into
+     two functions, call them everywhere.
+
+  C. GRACEFUL SHUTDOWN
+     import signal; signal.signal(signal.SIGINT, shutdown_handler).
+     On Ctrl+C: close all sockets, persist any in-memory state, exit.
+
+  D. ACTIVE OFFLINE DETECTION
+     Drizzle marks users offline only via HEARTBEAT_REQUEST timeout
+     (passive). Add a sweep: every N seconds, iterate uname_to_status
+     and mark anyone past ONLINE_TIMEOUT as offline. Optionally close
+     their socket. Drives a more responsive UI.
+
+  E. PERSISTENT USERNAMES
+     Save uname_to_ip to ~/.Echo/db/users.json on each registration.
+     On server restart, load it. Then the same client reconnecting
+     gets their old username back. Trade-off: IPs can change, so on
+     reconnect you may need to update.
+
+  F. STRUCTURED / CONTEXTUAL LOGGING
+     Use logging.LoggerAdapter or a custom Filter to inject peer
+     IP + username into every log line. Searching logs by user
+     becomes trivial.
+
+  G. STATS / ADMIN ENDPOINT
+     Add a new HeaderCode (e.g., STATS = "S") that returns:
+       {users_online: N, files_indexed: M, uptime_seconds: T,
+        requests_served: K}
+     Useful for debugging; also a great Phase 7 admin UI hook.
+
+  H. VALIDATION OF SHARE DATA
+     Drizzle accepts whatever the client sends. You should:
+       - Reject paths with ".." or absolute components (path
+         traversal guard).
+       - Reject if the tree is huge (DoS guard).
+       - Reject if a file's size doesn't fit in int64.
+     Cheap; protects against buggy clients more than malicious ones,
+     but still worth doing.
+
+  I. CONNECTION IDLE TIMEOUT
+     If a registered socket hasn't sent anything in 60s, close it.
+     Catches zombie connections from clients that crashed without
+     sending FIN. Combine with (D) for a robust liveness model.
+
+  J. CONFIG FILE
+     Instead of hardcoding SERVER_RECV_PORT in constants.py, read
+     from ~/.Echo/server.conf or env vars (ECHO_SERVER_PORT). Lets
+     you run multiple servers on the same machine for testing.
+
+  K. SEARCH RESULT CACHING
+     If item_search is showing up as slow, cache the flattened file
+     list per user. Invalidate on SHARE_DATA update. Saves recursion
+     on every query. (Premature optimization — measure first.)
+
+  L. RATE LIMITING
+     Cap FILE_SEARCH at, say, 10 queries per user per minute. Trivial
+     with a deque per user. Mostly an exercise; you don't have hostile
+     users on the LAN.
+
+  M. METRICS / OBSERVABILITY
+     Count requests by HeaderCode, track average handler latency.
+     Print summary on shutdown (or via the STATS endpoint from (G)).
+     Lightweight: a single dict + time.perf_counter() per handler.
+
+Pick 3-5 of these to actually implement. Don't try all. (A) and (C)
+are the highest-value-for-effort; (D) and (H) make Echo noticeably
+more robust than Drizzle.
+
+
+================================================================================
+DECISIONS TO MAKE BEFORE STARTING PHASE 3
+================================================================================
+
+  Q1. ONE FILE OR MANY?
+      Drizzle: one 455-line server.py. Acceptable but unwieldy.
+      Recommended for Echo: split into server/server.py (main loop +
+      bootstrap), server/handlers.py (per-HeaderCode handlers),
+      server/state.py (UserState dataclass + helpers).
+      Trade-off: more files but each is <150 lines.
+
+  Q2. ASYNCIO OR select()?
+      Recommended: select() for learning value and to match the
+      reference. Don't migrate to asyncio mid-project.
+
+  Q3. TinyDB OR SQLite?
+      Recommended: TinyDB. The whole point of share data is it's
+      schemaless trees. SQLite would require either JSON columns
+      (ugly) or relational normalization (painful for trees).
+
+  Q4. PERSIST uname_to_ip ACROSS RESTARTS?
+      Recommended: not in Phase 3. Add it later (Improvement E). For
+      now, just be aware: server restart = all clients re-register.
+
+  Q5. STRICT VALIDATION OF SHARE DATA?
+      Recommended: yes, at minimum the path traversal check
+      (Improvement H). Cheap and catches real bugs.
+
+  Q6. WINDOWS COMPAT FOR setsockopt?
+      Recommended: guard SO_PRIORITY with hasattr or try/except. Set
+      the others (SO_REUSEADDR, TCP_NODELAY, IP_TOS) unconditionally
+      — they work on Windows even if Windows ignores some.
+
+  Q7. HOW LOUD IS LOGGING?
+      Recommended: DEBUG to file (full trace), INFO to stdout (clean
+      narrative). Configure two handlers with different levels.
+
+
+================================================================================
+HOW TO VERIFY PHASE 3 IS DONE
+================================================================================
+
+Without a real client (still being built in Phase 4), you'll verify
+with two test scripts:
+
+  Test 1 — solo: a single client process that does registration,
+  share data upload, and a self-browse. Catches the basic happy path.
+
+  Test 2 — pair: TWO client processes (run as alice and bob), both
+  registered. Each does:
+    - browse the other's share data
+    - search for a known filename
+    - request the other's IP and username
+    - send heartbeats and observe the other's last_seen timestamp
+      update
+
+If both tests pass and the server doesn't leak sockets between runs
+(check with `netstat -ano | findstr 1234` on Windows after stopping),
+Phase 3 is done.
+
+Bonus verification: kill one client ungracefully (close terminal
+without Ctrl+C of the script). Server should log the disconnect and
+remove them from all three dicts within a few seconds (or
+immediately, if you implemented Improvement I — idle timeout).
+
+
+================================================================================
+WHAT'S NOT IN PHASE 3
+================================================================================
+
+  - The CLIENT process. Phase 4.
+  - Any GUI. Phase 5.
+  - Peer-to-peer messaging or file transfer. Those go P2P, the server
+    is not involved.
+  - Network discovery (mDNS / Bonjour). Drizzle requires clients to
+    know the server IP; Echo will too. Auto-discovery is a Phase 7
+    enhancement at best.
+  - TLS / authentication. Out of scope; LAN-only plaintext.
+
+
+================================================================================
+RECOMMENDED ORDER OF WORK FOR PHASE 3
+================================================================================
+
+  Session 1: Bootstrap. Open socket, bind, listen, accept one
+             connection, log it, close cleanly. No protocol yet.
+             Make sure Ctrl+C exits clean (Improvement C).
+
+  Session 2: select() main loop with the listener socket. Accept
+             multiple connections. Each one just gets a "hello, you
+             are socket #N" log message and is closed. Verify with
+             nc / telnet / a Python REPL.
+
+  Session 3: Wire up receive_message from Phase 2. Build the
+             registration flow only (NEW_CONNECTION + ack). Test with
+             a scratch client that sends a valid NEW_CONNECTION
+             header.
+
+  Session 4: REQUEST_IP, REQUEST_UNAME, HEARTBEAT_REQUEST. The "small
+             body, small body back" handlers. Get the dispatch pattern
+             solid.
+
+  Session 5: TinyDB + SHARE_DATA. Now you're persisting state. Test
+             upload/round-trip.
+
+  Session 6: FILE_BROWSE + FILE_SEARCH. The interesting query
+             handlers. Wire up helpers.item_search.
+
+  Session 7: UPDATE_HASH. Final handler.
+
+  Session 8: Polish. Pick 3 improvements from the list, implement.
+             Most likely: (A) consolidated state, (B) helpers, (C)
+             graceful shutdown. Maybe (H) validation.
+
+  Session 9: Two-client end-to-end test. Bug-fix whatever surfaces.
+
+If you stick to one session per day, that's about two weeks. Matches
+your timeline estimate.
+
+
+================================================================================
+                              END OF PLAN
+================================================================================
