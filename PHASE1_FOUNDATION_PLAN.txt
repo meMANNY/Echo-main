@@ -1,0 +1,278 @@
+================================================================================
+              PHASE 1 — FOUNDATION & ARCHITECTURE: DETAILED PLAN
+================================================================================
+                         Generated: May 27, 2026
+================================================================================
+
+CONTEXT
+-------
+You are starting the Echo project fresh off from the very beginning. To build
+a production-grade, reliable Peer-to-Peer (P2P) file sharing and chat system,
+you must establish a robust architectural foundation. 
+
+By the end of Phase 1, you will have a clean package structure, a functional
+virtual environment, comprehensive type safety (via Enums and TypedDicts),
+custom serialized exceptions, and a collection of critical file-system and 
+network primitives that will support all future phases.
+
+WHY THIS PHASE MATTERS
+----------------------
+A solid foundation prevents downstream architectural friction. In Phase 2 
+(Protocol) and Phase 3 (Server), you will be passing structured data, raising
+remote exceptions, and recursively crawling directory structures. Having
+rigid, well-tested utilities and robust types in place now means:
+  - You catch type mismatches at design-time rather than runtime.
+  - Sockets can transmit standardized exceptions that serialize seamlessly.
+  - Recursive directory tree walking and fuzzy searching are already solved.
+  - Your local workspace is clean and free of duplicate, confusing files.
+
+
+================================================================================
+PHASE 1.1 — PROJECT SETUP
+================================================================================
+
+GOAL: Establish a standard Python package layout, isolate dependencies within
+a virtual environment, and eliminate clutter in the codebase.
+
+
+--------------------------------------------------------------------------------
+STEP 1.1.1 — Clean up project structure
+--------------------------------------------------------------------------------
+
+Ensure the root folder matches the following structural layout:
+
+  Echo-main/
+    client/             # Peer/Client application code
+      ui/               # PyQt5 designer UI files and prototypes
+    server/             # Central coordinator/server code
+    utils/              # Shared helper modules, types, and exceptions
+    public/             # Default shared folder for local files
+    .gitignore          # Version control ignore rules
+    Pipfile             # Python package manager file
+
+Ensure folders are empty of dead code and ready for development.
+
+
+--------------------------------------------------------------------------------
+STEP 1.1.2 — Remove duplicate files
+--------------------------------------------------------------------------------
+
+Look for duplicate file footprints that can cause circular import issues or
+general confusion (e.g., a `server.py` in the root versus a `server/server.py`).
+  - Delete any redundant root-level scripts.
+  - Consolidate all server-side logic strictly inside the `server/` directory.
+  - Consolidate all client-side logic strictly inside the `client/` directory.
+
+
+--------------------------------------------------------------------------------
+STEP 1.1.3 — Create proper __init__.py files
+--------------------------------------------------------------------------------
+
+To make all directories importable packages in Python:
+  - Create an empty `__init__.py` file inside `client/`.
+  - Create an empty `__init__.py` file inside `server/`.
+  - Create an empty `__init__.py` file inside `utils/`.
+  - Create an empty `__init__.py` file inside `client/ui/`.
+
+
+--------------------------------------------------------------------------------
+STEP 1.1.4 — Set up virtual environment with Pipfile
+--------------------------------------------------------------------------------
+
+Using pipenv (or virtualenv with pip), initialize your project environment.
+Your `Pipfile` should contain the core dependencies for the project:
+
+  [packages]
+  pyqt5 = "*"
+  msgpack = "*"
+  tinydb = "*"
+  fuzzysearch = "*"
+  notify-py = "*"
+
+Run the command to install packages and generate the `Pipfile.lock`:
+  pipenv install
+
+
+--------------------------------------------------------------------------------
+STEP 1.1.5 — Create .gitignore properly
+--------------------------------------------------------------------------------
+
+Configure `.gitignore` in the root folder to ignore:
+  - Python cache directories (`__pycache__/`, `*.pyc`).
+  - Virtual environments (`.venv/`, `.env`).
+  - IDE specific files (`.vscode/`, `.idea/`).
+  - System files (`.DS_Store`, `Thumbs.db`).
+  - Local database paths and logs (`.Echo/` or local `db.json` files).
+
+
+================================================================================
+PHASE 1.2 — UTILS MODULE
+================================================================================
+
+GOAL: Build the robust types, custom exception objects, and helper primitives
+needed to drive the network protocol and application state.
+
+
+--------------------------------------------------------------------------------
+STEP 1.2.1 — Create utils/types.py
+--------------------------------------------------------------------------------
+
+Create `utils/types.py` to lock down type signatures. This ensures type safety
+across the server and client:
+
+  1. HeaderCode (Enum):
+     Maps a 1-character ASCII indicator to message types:
+       n = NEW_CONNECTION
+       r = REQUEST_IP
+       R = REQUEST_UNAME
+       d = SHARE_DATA
+       b = FILE_BROWSE
+       s = FILE_SEARCH
+       H = HEARTBEAT_REQUEST
+       F = FILE_REQUEST
+       t = DIRECT_TRANSFER_REQUEST
+       T = DIRECT_TRANSFER
+       m = MESSAGE
+       h = UPDATE_HASH
+       e = ERROR
+
+  2. TransferStatus (Enum):
+     Tracks state of active transfers:
+       PENDING, DOWNLOADING, PAUSED, COMPLETED, FAILED
+
+  3. TypedDict Declarations:
+     - DirData: {"name": str, "isDir": bool, "size": int, "hash": Optional[str], "children": list}
+     - FileMetadata: {"path": str, "size": int, "hash": Optional[str], "compression": bool}
+     - SocketMessage: {"type": HeaderCode, "query": bytes}
+     - UserSettings: {"username": str, "download_path": str, "share_path": str, "server_ip": str}
+     - Message: {"sender": str, "recipient": str, "text": str, "timestamp": float}
+
+
+--------------------------------------------------------------------------------
+STEP 1.2.2 — Create utils/exceptions.py
+--------------------------------------------------------------------------------
+
+Create `utils/exceptions.py`. To allow exceptions to travel over the wire, 
+implement a custom `RequestException` that serializes cleanly:
+
+  - Define `ExceptionCode` (Enum) containing:
+      UNAUTHORIZED, BAD_REQUEST, USER_EXISTS, NOT_FOUND, INVALID_HEADER, DISCONNECT
+  - Implement `RequestException(Exception)` with attributes:
+      `code` (ExceptionCode) and `msg` (str).
+  - Implement `to_dict(self) -> dict` returning `{"code": self.code.value, "msg": self.msg}`.
+  - Implement `@classmethod from_dict(cls, data: dict) -> "RequestException"`
+    reconstructing the exception with the appropriate Enum code.
+
+
+--------------------------------------------------------------------------------
+STEP 1.2.3 — Create utils/helpers.py
+--------------------------------------------------------------------------------
+
+Implement the core directory crawling, hashing, and searching utilities in
+`utils/helpers.py`:
+
+  1. `path_to_dict(folder_path: str) -> dict`:
+     Recursively walks a folder and outputs a structured directory tree 
+     following the `DirData` schema. Perfect for preparing files to share.
+
+  2. `get_file_hash(file_path: str) -> str`:
+     Calculates the SHA-1 checksum of a file. Reads the file in chunks 
+     (e.g., 64KB) to avoid memory spikes on large files.
+
+  3. `get_unique_filename(directory: str, filename: str) -> str`:
+     Checks if a file exists in the directory. If it does, appends a counter
+     (e.g., "file_1.txt", "file_2.txt") to prevent accidental overwrites.
+
+  4. `convert_size(size_bytes: int) -> str`:
+     Translates raw bytes into a human-readable string (e.g., "1.4 MB", "340 KB").
+
+  5. `item_search(share_tree: list[dict], results: list, query: str, owner: str) -> None`:
+     Fuzzily matches filenames in the tree against a query string. Adds matching
+     items to the `results` list.
+
+
+--------------------------------------------------------------------------------
+STEP 1.2.4 — Create utils/socket_functions.py
+--------------------------------------------------------------------------------
+
+Implement basic socket primitives:
+
+  1. `get_self_ip() -> str`:
+     Finds the local machine's LAN IP address by creating a temporary UDP socket
+     to a public DNS server (e.g., 8.8.8.8) and reading its local endpoint.
+     Does not transmit any packets.
+
+  2. `recvall(sock, length: int) -> bytes`:
+     Helper that repeatedly reads from a socket stream until exactly `length` 
+     bytes have been collected. This protects against partial TCP reads.
+
+  3. Stubs for `request_ip`, `request_uname`, and `update_share_data` which 
+     will connect to the server and exchange protocol messages (fully wired 
+     up in Phase 2).
+
+
+================================================================================
+RECOMMENDED FILE LAYOUT AFTER PHASE 1
+================================================================================
+
+  Echo-main/
+    utils/
+      __init__.py
+      constants.py          (defines standard lengths, ports, and formats)
+      types.py              (types, TypedDicts, and Enums)
+      exceptions.py         (custom RequestException)
+      helpers.py            (directory parsing, SHA-1 hashing, fuzzy search)
+      socket_functions.py   (IP lookup, recvall, connection stubs)
+    client/
+      __init__.py
+      ui/
+    server/
+      __init__.py
+
+
+================================================================================
+DECISIONS TO MAKE BEFORE YOU START WRITING PHASE 1
+================================================================================
+
+  Q1. Pipenv or standard virtualenv + pip?
+      Recommended: Pipenv is highly structured and maintains the lock file
+      reliably. If you prefer a simpler approach, a standard `requirements.txt`
+      with a `.venv/` folder works fine.
+
+  Q2. How to handle empty directories in `path_to_dict`?
+      Recommended: Exclude them or explicitly mark them with `"children": []`.
+      This prevents tree parsing crashes in future UI rendering steps.
+
+  Q3. How should `get_file_hash` handle permissions/locked files?
+      Recommended: Wrap in a try-except. If a file is locked, log a warning
+      and set the hash to `None` rather than crashing the scan.
+
+
+================================================================================
+HOW TO VERIFY PHASE 1 IS DONE
+================================================================================
+
+Create a quick test script in the workspace root to check helper functionality:
+
+  ```python
+  from utils.helpers import path_to_dict, convert_size, get_file_hash
+  from utils.socket_functions import get_self_ip
+  
+  # 1. Test IP detection
+  print(f"My local IP: {get_self_ip()}")
+  
+  # 2. Test convert size
+  print(f"1048576 bytes = {convert_size(1048576)}")
+  
+  # 3. Test directory indexing
+  tree = path_to_dict("./public")
+  print("Share folder tree generated successfully.")
+  ```
+
+If the script runs without exceptions and displays the expected outputs, 
+Phase 1 is complete and verified!
+
+
+================================================================================
+                              END OF PLAN
+================================================================================

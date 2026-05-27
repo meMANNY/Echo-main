@@ -1,0 +1,486 @@
+================================================================================
+              PHASE 2 — COMMUNICATION PROTOCOL: DETAILED PLAN
+================================================================================
+                         Generated: 2026-05-19
+================================================================================
+
+CONTEXT
+-------
+Phase 1 (Foundation & Architecture) is done. You have:
+  - utils/types.py        (HeaderCode, TypedDicts)
+  - utils/exceptions.py   (RequestException with to/from_dict)
+  - utils/constants.py    (HEADER_TYPE_LEN=1, HEADER_MSG_LEN=15, FMT="utf-8")
+  - utils/helpers.py      (12 tree/file utilities)
+  - utils/socket_functions.py (get_self_ip, recvall, request_uname,
+                               request_ip, update_share_data)
+
+Phase 2 turns those primitives into a real wire protocol. By the end of
+Phase 2 you should be able to point two Python processes at each other and
+have them exchange typed, length-framed messages reliably — registration,
+file metadata, search queries, chat, errors, the works.
+
+WHY THIS PHASE MATTERS
+----------------------
+Right now in socket_functions.py you have raw f-string header construction
+inlined into every function:
+
+    f"{HeaderCode.X.value}{len(body):<{HEADER_MSG_LEN}}".encode(FMT)
+
+That's fine for 3 functions. The full app has ~20 message-sending sites
+across server.py + client code. Without builder/parser helpers, you'll
+either (a) copy-paste that line 20 times, or (b) get subtle bugs from
+typos. Phase 2 is where you stop that.
+
+This phase produces NO new user-facing features. It is pure infrastructure.
+But Phase 3 (Server) and Phase 4 (Client Core) will move ~3x faster because
+of it.
+
+
+================================================================================
+PHASE 2.1 — PROTOCOL DESIGN
+================================================================================
+
+GOAL: A documented, well-defined wire format that both client and server
+agree on. No code changes to existing files yet — just a single new file
+that defines the protocol primitives, plus possibly some additions to
+types.py.
+
+
+--------------------------------------------------------------------------------
+STEP 2.1.1 — Install msgpack
+--------------------------------------------------------------------------------
+
+  pipenv install msgpack
+  pipenv install fuzzysearch    # also needed by helpers.item_search
+
+Verify in REPL:
+  >>> import msgpack
+  >>> msgpack.packb({"a": 1})
+  >>> msgpack.unpackb(b'\x81\xa1a\x01')
+
+Why msgpack and not JSON?
+  - Binary, smaller payloads (file metadata can get big)
+  - Supports bytes natively (JSON would force base64)
+  - Streamable, fast
+  - Drizzle uses it; matching the reference reduces ambiguity
+
+
+--------------------------------------------------------------------------------
+STEP 2.1.2 — Lock down the wire format (document it)
+--------------------------------------------------------------------------------
+
+The format is fixed by what's already in constants.py:
+
+    +--------+----------------+---------------------------+
+    | TYPE   | LENGTH         | BODY                      |
+    | 1 byte | 15 bytes ASCII | <LENGTH> bytes (msgpack   |
+    |        | left-aligned   | OR utf-8 text OR raw      |
+    |        | space-padded   | bytes — depends on TYPE)  |
+    +--------+----------------+---------------------------+
+
+Examples on the wire:
+
+  Registration:
+    b"n" + b"alice          " + b"alice"
+    (TYPE=n, LENGTH="5" padded to 15 chars, BODY="alice")
+
+  Share data:
+    b"d" + b"4823           " + <4823 bytes of msgpack>
+
+  Error response:
+    b"e" + b"87             " + <87 bytes of msgpack'd RequestException>
+
+Decisions to lock in NOW:
+
+  D1. BODY ENCODING per HeaderCode (this is the most important table —
+      keep it in your head while you build):
+
+         TYPE  Direction       Body encoding         Body shape
+         ----  --------------  --------------------  -------------------
+         n     C->S then S->C  utf-8 bytes           username string
+         r     C->S            utf-8 bytes           username string
+         r     S->C            utf-8 bytes           IP string
+         R     C->S            utf-8 bytes           IP string
+         R     S->C            utf-8 bytes           username string
+         d     C->S            msgpack               list[DirData]
+         d     S->C            (no body, ack only)   —
+         b     C->S            utf-8 bytes           username string
+         b     S->C            msgpack               list[DBData]
+         s     C->S            utf-8 bytes           query string
+         s     S->C            msgpack               list[ItemSearchResult]
+         H     C->S            utf-8 bytes           literal "online" or "1"
+         H     S->C            msgpack               dict[uname -> timestamp]
+         F     C->P (peer)     msgpack               FileRequest
+         F     P->C            (raw file stream, framed differently)
+         t     P->P            msgpack               FileMetadata
+         T     P->P            msgpack then raw      header msgpack, then bytes
+         m     P->P            utf-8 bytes           message text
+         h     C->S            msgpack               UpdateHashParams
+         e     S->C or P->P    msgpack               RequestException
+         D     (reserved)      —                     for incremental share updates
+
+      "C=Client, S=Server, P=Peer". Note "d" (lowercase, SHARE_DATA) is
+      C->S, "D" (uppercase, UPDATE_SHARE_DATA — already in your
+      HeaderCode enum) is reserved for incremental pushes if you add
+      them later. Skip "D" for now.
+
+  D2. ERROR RESPONSES ARE UNIVERSAL.
+      Any request (C->S or P->P) can be answered with type "e" instead
+      of the expected response type. Body is always msgpack'd
+      RequestException using your existing to_dict/from_dict. Parsers
+      must handle this case for every request type.
+
+  D3. NO ENCRYPTION, NO AUTHENTICATION.
+      The protocol is LAN-only, plaintext. Don't try to add TLS/HMAC
+      now — that's out of scope for this project.
+
+  D4. ONE REQUEST = ONE RESPONSE.
+      Synchronous request/response over a single socket. No interleaving,
+      no message IDs. Caller is responsible for keeping its socket
+      single-threaded (use a Lock if multiple Qt workers touch the same
+      server socket).
+
+  D5. CONNECTION LIFETIME.
+      Client opens ONE persistent TCP socket to the server at startup,
+      reuses it for the entire session. Server keeps it open until the
+      client disconnects (caught via the DISCONNECT exception code).
+      Peer-to-peer sockets are short-lived: one connect per
+      message/file/chat.
+
+
+--------------------------------------------------------------------------------
+STEP 2.1.3 — Walk through every HeaderCode (the 13 you have in types.py)
+--------------------------------------------------------------------------------
+
+For each one, know: who sends it, what the body is, what the response is,
+and what error codes it can return. Reference: Drizzle/src/server/server.py.
+
+  n  NEW_CONNECTION
+     C->S: send your chosen username (utf-8 bytes).
+     S->C: replies with just b"n" (1 byte, no body) on success.
+     Errors: USER_EXISTS, BAD_REQUEST (re-register from same IP).
+     Always the FIRST message a client sends. Until this succeeds the
+     server will reject everything else with UNAUTHORIZED.
+
+  r  REQUEST_IP
+     C->S: username (utf-8).
+     S->C: peer's IP as utf-8.
+     Errors: NOT_FOUND, BAD_REQUEST (asking for your own IP).
+
+  R  REQUEST_UNAME
+     C->S: peer's IP (utf-8).
+     S->C: peer's username (utf-8).
+     Errors: NOT_FOUND, BAD_REQUEST.
+
+  d  SHARE_DATA
+     C->S: msgpack of path_to_dict(share_folder)["children"].
+     S->C: b"d" (ack, no body).
+     Called after registration and any time share folder changes.
+
+  b  FILE_BROWSE
+     C->S: target username (utf-8).
+     S->C: msgpack of the target's DBData list.
+     Errors: NOT_FOUND.
+
+  s  FILE_SEARCH
+     C->S: search query (utf-8, lowercase recommended).
+     S->C: msgpack of list[ItemSearchResult] across ALL users except self.
+     Server runs item_search() from helpers.py.
+
+  H  HEARTBEAT_REQUEST
+     C->S: any short payload (Drizzle sends b"1"; "online" also works).
+     S->C: msgpack dict {uname: last_seen_unix_timestamp} for all users
+           EXCEPT the caller.
+     Client uses this to drive the online/offline UI. Fired every
+     HEARTBEAT_TIMER seconds (5s, from constants.py).
+
+  F  FILE_REQUEST
+     C->P (peer): msgpack of FileRequest TypedDict
+       {filepath, port, request_hash, resume_offset}
+     P sends back the raw file bytes on the port specified. This one
+     does NOT follow the "msgpack body" rule on the response — peer
+     opens a new socket on `port` and streams bytes.
+     This is peer-to-peer, NOT server-mediated.
+
+  t  DIRECT_TRANSFER_REQUEST
+     P->P: msgpack of FileMetadata {path, size, hash, compression}.
+     Receiver shows accept/reject dialog. If accepted, sender follows up
+     with "T" (DIRECT_TRANSFER).
+     If receiver rejects: respond with "e" type (RequestException,
+     code=UNAUTHORIZED or similar).
+
+  T  DIRECT_TRANSFER
+     P->P: header + msgpack(FileMetadata), then raw file bytes.
+     Sent after receiver acks a "t". Two-stage: metadata frame, then
+     the stream.
+
+  m  MESSAGE
+     P->P: utf-8 message text (max MESSAGE_MAX_LEN = 256 bytes).
+     Direct peer-to-peer chat. No server involvement.
+
+  h  UPDATE_HASH
+     C->S: msgpack of UpdateHashParams {filepath, hash}.
+     S updates its TinyDB record so future browse/search returns the
+     correct hash. No response body (fire-and-forget, but check for
+     error response).
+
+  e  ERROR
+     Any side -> any side. Body is msgpack'd RequestException using
+     your existing RequestException.to_dict. Receiver decodes with
+     msgpack.unpackb(..., object_hook=RequestException.from_dict).
+     Reading it should mostly just log + return None to the caller.
+
+
+--------------------------------------------------------------------------------
+STEP 2.1.4 — Server-initiated vs client-initiated; sockets per direction
+--------------------------------------------------------------------------------
+
+  - Client-to-server: ONE persistent socket on the client side
+    (CLIENT_SEND_PORT outbound), connecting to (server_ip,
+    SERVER_RECV_PORT). All "to server" messages go here.
+
+  - Server never initiates a message. It only responds.
+
+  - Peer-to-peer: client opens a fresh TCP socket to
+    (peer_ip, CLIENT_RECV_PORT) per request. Closes after the
+    response/transfer is done.
+
+  - Each client also runs a listener on CLIENT_RECV_PORT in a worker
+    thread to receive peer requests. That's a Phase 4/5 concern — for
+    Phase 2 you only need to know the ports exist.
+
+
+================================================================================
+PHASE 2.2 — MESSAGE HANDLING
+================================================================================
+
+GOAL: Replace ad-hoc f-string headers with reusable builder/parser
+helpers. After this step, sending a typed message is a one-liner.
+
+
+--------------------------------------------------------------------------------
+STEP 2.2.1 — Create utils/protocol.py (NEW FILE)
+--------------------------------------------------------------------------------
+
+Drizzle does NOT have a dedicated protocol.py — the pattern lives inline
+in server.py and the various worker classes. That's a missed
+opportunity. Echo should consolidate. Create utils/protocol.py with:
+
+  Imports at the top:
+    import logging
+    import socket
+    import msgpack
+    from utils.constants import FMT, HEADER_MSG_LEN, HEADER_TYPE_LEN
+    from utils.exceptions import ExceptionCode, RequestException
+    from utils.socket_functions import recvall
+    from utils.types import HeaderCode, SocketMessage
+
+  Functions to implement (build in this order):
+
+  1. build_header(type_code: HeaderCode, body_len: int) -> bytes
+     Returns the 16-byte header (1 type + 15 length).
+     This replaces every f"{X}{len:<15}" line in your codebase.
+
+  2. send_message(sock, type_code: HeaderCode, body: bytes = b"") -> None
+     Builds header, calls sock.sendall(header + body).
+     `body` is bytes — caller is responsible for serialization
+     (utf-8 encode or msgpack.packb) BEFORE calling.
+
+  3. receive_message(sock) -> SocketMessage
+     Reads HEADER_TYPE_LEN bytes for type. Validates it against
+     HeaderCode (raise RequestException INVALID_HEADER on bad type).
+     If type is "e" (ERROR): read length, recvall body, unpack into
+     RequestException, raise it. (Caller chooses to catch.)
+     Otherwise: read length, recvall body, return SocketMessage
+     {"type": HeaderCode, "query": bytes}.
+     Handle disconnect: if first recv returns b"", raise
+     RequestException with DISCONNECT code.
+
+  4. send_error(sock, exc: RequestException) -> None
+     Helper for the server side. Packs the exception with
+     msgpack.packb(exc, default=RequestException.to_dict,
+     use_bin_type=True), then send_message with HeaderCode.ERROR.
+
+  5. send_msgpack(sock, type_code: HeaderCode, obj) -> None
+     Convenience: msgpack.packb(obj) + send_message. Used everywhere
+     bodies are structured data (SHARE_DATA, FILE_REQUEST, etc).
+
+  6. send_text(sock, type_code: HeaderCode, text: str) -> None
+     Convenience: text.encode(FMT) + send_message. Used for
+     username/IP/query bodies.
+
+That's six functions, ~80-100 lines total. Once these exist, every
+existing call site collapses dramatically.
+
+
+--------------------------------------------------------------------------------
+STEP 2.2.2 — Refactor utils/socket_functions.py to use protocol.py
+--------------------------------------------------------------------------------
+
+Once protocol.py is working, go back and rewrite:
+
+  - request_uname(): replace the inline header building with
+      send_text(sock, HeaderCode.REQUEST_UNAME, ip)
+      msg = receive_message(sock)
+      return msg["query"].decode(FMT) if msg["type"] == REQUEST_UNAME else None
+    The try/except for ERROR is now handled inside receive_message
+    (raises RequestException, you catch + log + return None).
+
+  - request_ip(): same shape as above.
+
+  - update_share_data(): use send_msgpack for the share tree,
+    receive_message to read the ack.
+
+This is also where you'll catch any bugs in receive_message — if these
+three functions still work end-to-end after the refactor, the protocol
+helpers are solid.
+
+
+--------------------------------------------------------------------------------
+STEP 2.2.3 — Error handling policy
+--------------------------------------------------------------------------------
+
+Lock these conventions in early or you'll regret it:
+
+  - Network layer (protocol.py): raises RequestException with appropriate
+    ExceptionCode. NEVER returns None for failures; always raise. This
+    way the type signature is honest.
+
+  - Caller layer (socket_functions.py, future client code): catches
+    RequestException, logs it, returns None or a sensible default.
+    UI never sees a RequestException directly.
+
+  - Server-side: catches RequestException in its main loop, calls
+    send_error() to push it to the client, continues serving.
+
+  - Disconnect detection: `recv()` returning b"" means the peer closed.
+    receive_message() must detect this and raise
+    RequestException(DISCONNECT). Both server (to drop from
+    sockets_list) and client (to attempt reconnect or surface "server
+    unreachable" to user) rely on this.
+
+  - Bad msgpack data: catch msgpack.exceptions.UnpackException inside
+    receive_message and convert to RequestException(BAD_REQUEST). Don't
+    leak msgpack-specific exceptions to callers.
+
+
+================================================================================
+RECOMMENDED FILE LAYOUT AFTER PHASE 2
+================================================================================
+
+  Echo-main/
+    utils/
+      __init__.py
+      constants.py          (unchanged)
+      exceptions.py         (unchanged)
+      types.py              (unchanged; maybe add a couple TypedDicts if
+                             you discover gaps while building)
+      helpers.py            (unchanged)
+      protocol.py           NEW — 6 functions above
+      socket_functions.py   REFACTORED — uses protocol.py
+      data/peers.py         (unchanged for now)
+
+
+================================================================================
+DECISIONS TO MAKE BEFORE YOU START WRITING PHASE 2
+================================================================================
+
+  Q1. Where does protocol.py live? (Recommend utils/protocol.py.
+      Alternative: split into utils/wire.py for low-level
+      build/send/receive and utils/messages.py for typed helpers. For
+      now, one file is simpler.)
+
+  Q2. Body serialization — explicit at call site or auto-detected?
+      Recommended: explicit. send_msgpack() for structured data,
+      send_text() for strings, send_message() for already-bytes. Don't
+      make build_header() guess.
+
+  Q3. Should receive_message() auto-decode the body?
+      Recommended: NO. Return raw bytes in SocketMessage["query"]; let
+      each call site decide whether to .decode(FMT) or msgpack.unpackb.
+      Reason: bodies are heterogeneous per HeaderCode. Auto-decoding
+      forces a giant switch inside receive_message.
+
+  Q4. Thread safety — does protocol.py need a Lock around socket
+      operations?
+      Recommended: NO, push that concern to the caller. The functions
+      themselves are stateless. But document loudly: "do not call
+      receive_message() from two threads on the same socket."
+
+
+================================================================================
+HOW TO VERIFY PHASE 2 IS DONE
+================================================================================
+
+End-to-end test (no UI needed):
+
+  Write a tiny scratch script (don't commit it; just a sanity check):
+
+    # term 1 — fake server
+    s = socket.socket(); s.bind(("127.0.0.1", 9999)); s.listen()
+    conn, _ = s.accept()
+    msg = receive_message(conn)         # should get a SocketMessage
+    print(msg)
+    send_text(conn, HeaderCode.REQUEST_UNAME, "alice")
+
+    # term 2 — fake client
+    s = socket.socket(); s.connect(("127.0.0.1", 9999))
+    send_text(s, HeaderCode.REQUEST_IP, "alice")
+    print(receive_message(s))           # should get {type: REQUEST_UNAME, query: b"alice"}
+
+  Then test the error path:
+    Have the "server" do send_error(conn,
+        RequestException(msg="nope", code=ExceptionCode.NOT_FOUND))
+    Client's receive_message() should raise RequestException. Catch it,
+    confirm code and msg are intact end-to-end.
+
+If both work, Phase 2 is done. Delete the scratch script.
+
+Then update PROGRESS_AND_TASKS.txt: mark all of section 2.1 and 2.2
+done.
+
+
+================================================================================
+WHAT'S NOT IN PHASE 2 (resist scope creep)
+================================================================================
+
+  - The actual server loop (select-based) — that's Phase 3.1.
+  - Connecting on app startup — Phase 4.1.
+  - QThread workers that wrap these calls — Phase 5.4.
+  - TinyDB integration — Phase 3.2.
+  - Anything PyQt-related.
+
+Phase 2 should take 3–5 sessions of focused work. If you find yourself
+writing socket loops or database code, you've drifted — stop, save the
+work elsewhere, and come back.
+
+
+================================================================================
+RECOMMENDED ORDER OF WORK FOR PHASE 2
+================================================================================
+
+  Session 1: Install msgpack + fuzzysearch. Read Drizzle's
+             server.py lines 71-136 (receive_msg) and 219-220
+             (header-build pattern). Make sure you can recite the
+             wire format from memory.
+
+  Session 2: Write build_header, send_message, receive_message in
+             protocol.py. Test with the localhost scratch script above
+             (just header round-trip, no real bodies).
+
+  Session 3: Add send_msgpack, send_text, send_error. Test the error
+             path with RequestException round-trip.
+
+  Session 4: Refactor socket_functions.py to use protocol.py.
+             Verify the three functions still have the same external
+             behavior.
+
+  Session 5 (optional): Walk through each of the 13 HeaderCodes again
+             and write a one-paragraph docstring in protocol.py or a
+             separate PROTOCOL.md describing the body shape and error
+             responses. Future-you will thank present-you.
+
+
+================================================================================
+                              END OF PLAN
+================================================================================
