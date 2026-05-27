@@ -56,6 +56,9 @@ def update_share_data(share_folder_path: Path, client_send_socket: socket.socket
     share_data = msgpack.packb(path_to_dict(share_folder_path, str(share_folder_path))["children"])
     share_data_header = f"{HeaderCode.SHARE_DATA.value}{len(share_data):<{HEADER_MSG_LEN}}".encode(FMT)
    
+    # This tells Python that formatting rules are coming next.
+    # <: This means left-align the value (and pad it on the right).
+    # {: <15}: means format the following value to be left aligned and padded with spaces to a total width of 15 characters.
     client_send_socket.sendall(share_data_header+share_data)
 
     msg_type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
