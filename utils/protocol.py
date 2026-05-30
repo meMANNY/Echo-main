@@ -129,7 +129,38 @@ def receive_message(sock : socket.socket) -> SocketMessage:
     })
 
 
-    
+#packs up a RequestException and sends it as an error message to the peer/client
+def send_error(sock: socket.socket, err: RequestException) -> None:
+
+    """ Function to catch error by server/peer and 
+    send it to the client/peer in a structured format"""
+
+    #when having custom class we need a default function to convert it to a dict for msgpack
+
+    body = msgpack.packb(err, default = RequestException.to_dict,use_bin_type = True)
+    send_message(sock, HeaderCode.ERROR, body)
+
+
+#packs up a structured message and sends it to the peer/client
+def send_msgpack(sock: socket.socket, type_code : HeaderCode, obj) -> None:
+
+    """ Function to send a structured message like 
+    dict, list of file metadata, search results etc."""
+
+
+    body = msgpack.packb(obj,use_bin_type = True)
+
+    send_message(sock, type_code, body)
+
+
+def send_text(sock: socket.socket, type_code : HeaderCode, text: str) -> None:
+
+    """ Function to send a simple text message to the peer/client"""
+
+    body = text.encode(FMT)
+    send_message(sock, type_code, body)
+
+
 
     
 
