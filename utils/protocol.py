@@ -144,7 +144,7 @@ def send_error(sock: socket.socket, err: RequestException) -> None:
 #packs up a structured message and sends it to the peer/client
 
 
-#the last two functions helps in making the business logic clean and structured
+#the last two functions helps in making the business logic clean and structured.
 def send_msgpack(sock: socket.socket, type_code : HeaderCode, obj) -> None:
 
     """ Function to send a structured message like 
