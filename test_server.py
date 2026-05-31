@@ -3,8 +3,8 @@ import sys
 # Ensure imports from utils directory work properly
 sys.path.insert(0, ".")
 
-from utils.protocol import receive_message, send_text
-from utils.types import HeaderCode
+from utils.protocol import receive_message, send_error
+from utils.exceptions import RequestException, ExceptionCodes
 
 def main():
     print("[SERVER] Starting test server on 127.0.0.1:9999...")
@@ -22,9 +22,10 @@ def main():
         msg = receive_message(conn)
         print(f"[SERVER] Received message from client: {msg}")
         
-        # 2. Reply to client using send_text
-        print("[SERVER] Replying to client with HeaderCode.REQUEST_UNAME: 'alice'")
-        send_text(conn, HeaderCode.REQUEST_UNAME, "alice")
+        # 2. Reply to client by transmitting a simulated RequestException
+        print("[SERVER] Simulating server error: sending ExceptionCodes.NOT_FOUND ('nope')")
+        exc = RequestException(msg="nope", code=ExceptionCodes.NOT_FOUND)
+        send_error(conn, exc)
         
     except Exception as e:
         print(f"[SERVER] Error: {e}")
