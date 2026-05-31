@@ -68,14 +68,38 @@ def update_share_data(share_folder_path: Path, client_send_socket: socket.socket
         send_msgpack(client_send_socket,HeaderCode.SHARE_DATA, children)
         msg = receive_message(client_send_socket)
 
-        if msg["type"] != HeaderCode.SHARE_DATA.value:
-            logging.error("Invalid Messageg type from the server")
+        if msg["type"] != HeaderCode.SHARE_DATA:
+            logging.error("Invalid Message type from the server")
 
     except RequestException as e:
         logging.error(f"Failed to update share data: {e.msg}")
 
     
+def request_ip(username: str, client_send_socket: socket.socket) -> str | None:
     
+    """ To request the ip address of a peer from the server using the peer's username. """   
+
+
+
+    try:
+        send_text(client_send_socket, HeaderCode.REQUEST_IP, username)
+        logging.debug(f"Sent IP request for {username} to the server.")
+
+        msg = receive_message(client_send_socket)
+
+        logging.debug(f"Received response for IP request: {msg} for {username}.")
+
+        if msg["type"] == HeaderCode.REQUEST_IP:
+            return msg["query"].decode(FMT)
+        
+        else:
+            logging.error(f"Unexpected message type received: {msg['type']} for IP request of {username}.")
+            return None
+    
+    except RequestException as e:
+        logging.error(f"Failed to request IP for {username}: {e.msg}")
+        return None
+
     
 
 
