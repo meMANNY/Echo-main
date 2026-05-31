@@ -3,9 +3,7 @@ import logging
 import socket
 from pathlib import Path
 
-import msgpack
-
-from utils.constants import FMT, HEADER_MSG_LEN, HEADER_TYPE_LEN
+from utils.constants import FMT
 from utils.exceptions import RequestException
 from utils.helpers import path_to_dict
 from utils.types import HeaderCode
@@ -30,21 +28,7 @@ def get_self_ip()->str:
     return ip 
     
 
-def recvall(peer_socket: socket.socket, length: int) -> bytes:
 
-    """ To ensure loseless data receipt in large communication"""
-
-    received = 0
-    data:bytes = b""
-
-    while received != length:
-        chunk = peer_socket.recv(length)
-        if not len(chunk):
-            break
-        data += chunk
-        received += len(chunk)
-    
-    return data
 
 def update_share_data(share_folder_path: Path, client_send_socket: socket.socket):
 
@@ -100,8 +84,28 @@ def request_ip(username: str, client_send_socket: socket.socket) -> str | None:
         logging.error(f"Failed to request IP for {username}: {e.msg}")
         return None
 
-    
 
+def request_uname(ip: str, client_send_socket: socket.socket) -> str | None:
+
+    """ Request a user's username from the server using their IP address. """
+
+    try:
+        send_text(client_send_socket, HeaderCode.REQUEST_UNAME, ip)
+        logging.debug(f"Sent username request for IP {ip} to the server.")
+
+        msg = receive_message(client_send_socket)
+
+        if msg["type"] == HeaderCode.REQUEST_UNAME:
+            return msg["query"].decode(FMT)
+        
+        else:
+            logging.error(f"Unexpected message type received: {msg['type']} for username request of IP {ip}.")
+            return None
+    
+    except RequestException as e:   
+        logging.error(f"Failed to request username for IP {ip}: {e.msg}")
+        return None
+        
 
 
 

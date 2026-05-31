@@ -4,9 +4,24 @@ import msgpack
 
 from utils.constants import FMT, HEADER_MSG_LEN, HEADER_TYPE_LEN
 from utils.exceptions import  ExceptionCodes, RequestException
-from utils.socket_functions import recvall
+
 from utils.types import HeaderCode, SocketMessage
 
+def recvall(peer_socket: socket.socket, length: int) -> bytes:
+
+    """ To ensure loseless data receipt in large communication"""
+
+    received = 0
+    data:bytes = b""
+
+    while received != length:
+        chunk = peer_socket.recv(length)
+        if not len(chunk):
+            break
+        data += chunk
+        received += len(chunk)
+    
+    return data
 
 def build_header(type_code: HeaderCode, body_len: int) -> bytes:
 
