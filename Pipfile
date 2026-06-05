@@ -6,10 +6,10 @@ name = "pypi"
 [packages]
 env = "*"
 pyqt5 = "*"
-tinydb = "*"
 fuzzysearch = "*"
 notify-py = "*"
 msgpack = "*"
+tinydb = "*"
 
 [dev-packages]
 
