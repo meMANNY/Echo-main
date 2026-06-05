@@ -25,6 +25,49 @@ IP = get_self_ip()
 
 # files = ['test_server.py']
 
+echo_dir = Path.home()/ ".Echo" # Directory to store files
+logs_dir = echo_dir / "logs" # Directory to store logs
+db_dir = echo_dir / "db" # Path to the database file
+
+
+logs_dir.mkdir(parents=True, exist_ok=True)
+db_dir.mkdir(parents=True, exist_ok=True)
+
+
+#Logging configuration(console and file logs)
+
+timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+log_file = logs_dir / f"server_{timestamp}.log"
+
+log_format = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s') # Log Format for consistency
+
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(log_format) #allows me to watch output in real-time in console
+
+
+file_handler = logging.FileHandler(log_file, encoding='utf-8')
+file_handler.setFormatter(log_format) #allows me to have a record of all events in a log file
+
+
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO) # Set the logging level to INFO
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
+
+
+
+
+
+
+
+
+
+
+
+
 def send_file(s, server):
     try:
         file_path = input("Enter the path of the file to send: ")
