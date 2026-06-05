@@ -1,9 +1,27 @@
 import socket
-import threading
-import time
-import math
+import logging
+import sys
 import os
-from utils.data.peers import peers
+import time
+
+from datetime import datetime
+from pathlib import Path
+from pprint import pprint
+
+#imports (PyPI)
+import msgpack
+from tinydb import TinyDB, Query
+
+#import from utils folder
+
+from utils.constants import FMT,HEADER_MSG_LEN,HEADER_TYPE_LEN,SERVER_RECV_PORT
+from utils.exceptions import ExceptionCodes, RequestException
+from utils.helpers import item_search, update_file_hash
+from utils.socket_functions import get_self_ip
+from utils.protocol import recvall, send_message, receive_message
+from utils.types import DBData, DirData, HeaderCode, ItemSearchResult, Message, SocketMessage, UpdateHashParams
+
+IP = get_self_ip()
 
 # files = ['test_server.py']
 
@@ -18,7 +36,7 @@ def send_file(s, server):
         file_size = str(math.ceil(file_size/1024))
         print("File size is:", file_size)
 
-        s.send(file_size.encode())
+        s.send(file_size.encode()) 
         #delay 1 sec
         time.sleep(1)
 
