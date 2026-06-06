@@ -56,6 +56,17 @@ root_logger.setLevel(logging.INFO) # Set the logging level to INFO
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
 
+#could use locks to prevent race conditions in TINYDB
+echo_db = TinyDB(db_dir / "echo_db.json")
+
+print(f"Server IP: {IP}")
+
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+server_socket.bind((IP, SERVER_RECV_PORT))
+server_socket.listen(5)
+
+
 
 
 
