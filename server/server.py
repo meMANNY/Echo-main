@@ -63,8 +63,19 @@ print(f"Server IP: {IP}")
 
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+
+#socket options -> defines socket behavior and performance
+
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1) # Allow the socket to be reused immediately after the program terminates, preventing "Address already in use" errors during development and testing
+server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) # Disable Nagle's algorithm for low-latency communication   
+server_socket.setsockopt(socket.IPPROTO_TCP, socket.IP_TOS, 0x10 | 0x08) # Set Type of Service to minimize delay (0x10 is the value for low delay)
+server_socket.setsockopt(socket.SOL_SOCKET,socket.SO_PRIORITY,0x06) # Set socket priority 
+
 server_socket.bind((IP, SERVER_RECV_PORT))
 server_socket.listen(5)
+
+
+
 
 
 
