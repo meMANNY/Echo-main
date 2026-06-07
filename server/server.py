@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import socket
 import logging
 import sys
@@ -68,12 +69,38 @@ server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1) # Allow the socket to be reused immediately after the program terminates, preventing "Address already in use" errors during development and testing
 server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) # Disable Nagle's algorithm for low-latency communication   
-server_socket.setsockopt(socket.IPPROTO_TCP, socket.IP_TOS, 0x10 | 0x08) # Set Type of Service to minimize delay (0x10 is the value for low delay)
-server_socket.setsockopt(socket.SOL_SOCKET,socket.SO_PRIORITY,0x06) # Set socket priority 
+server_socket.setsockopt(socket.IPPROTO_TCP, socket.IP_TOS, 0x10 | 0x08)# Set Type of Service to minimize delay (0x10 is the value for low delay)
+
+if hasattr(socket, 'SO_PRIORITY'):
+    server_socket.setsockopt(socket.SOL_SOCKET,socket.SO_PRIORITY,0x06) # Set socket priority 
 
 server_socket.bind((IP, SERVER_RECV_PORT))
 server_socket.listen(5)
 
+
+#List of connected peers
+sockets_list : list[socket.socket] = [server_socket]
+
+# #To lookup IP of a given user
+# uname_to_ip: dict[str,str] = {}
+
+# #To lookup username of a given IP
+# ip_to_uname: dict[str,str] = {}
+
+# #Mapping from username to last seen timestamp
+# uname_to_status: dict[str,float] = {}
+
+#USERSTATE DATACLASS
+
+@dataclass
+class UserState:
+    uname: str
+    ip: str
+    socket: socket.socket
+    last_seen: float
+
+users: dict[str, UserState] = {} # Mapping from username to UserState
+sockets_to_users: dict[socket.socket, UserState] = {} # Mapping from socket to UserState
 
 
 
