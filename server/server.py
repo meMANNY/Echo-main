@@ -98,9 +98,12 @@ class UserState:
     ip: str
     socket: socket.socket
     last_seen: float
-
+#They don't hold two copies, rather two references to the same UserState object.
 users: dict[str, UserState] = {} # Mapping from username to UserState
+
+# Designing my lookups around the key I'll actually have at the moment I need them.
 sockets_to_users: dict[socket.socket, UserState] = {} # Mapping from socket to UserState
+
 
 
 
