@@ -145,15 +145,25 @@ def unregister_user(client_socket: socket.socket) -> None:
 
     """ Safely cleans up and removes the user from all memory registery"""
 
+    if client_socket == server_socket:
+        logging.warning("Server tried to unregister the listerner socket.")
+        return
+
+    #retrieves the value if exist or returns None.
     user = sockets_to_users.pop(client_socket, None)
 
-    if user:
+    if user is not None:
 
         users.pop(user.uname, None)
         logging.info(f"User '{user.uname}' disconnected with IP: {user.ip}.")
     else:
         
         logging.debug("Unregistered socket connection closed.")
+
+    #remove the closed connection
+    if client_socket in sockets_list:
+        sockets_list.remove(client_socket)
+
 
     try:
         client_socket.close()
