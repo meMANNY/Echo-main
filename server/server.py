@@ -104,7 +104,61 @@ users: dict[str, UserState] = {} # Mapping from username to UserState
 # Designing my lookups around the key I'll actually have at the moment I need them.
 sockets_to_users: dict[socket.socket, UserState] = {} # Mapping from socket to UserState
 
+def register_user(uname: str, ip: str, client_socket: socket.socket ) -> UserState:
+    """Attempts to register a user state and return the UserState object.
+    
+    Raises RequestException if the username is already taken 
+    or if the IP is already in use by another user.
+    """
 
+    if uname in users:
+        existing_user = users[uname]
+
+        if existing_user.ip == ip:
+            logging.warning(f"User '{uname}' with IP {ip} is already registered.")
+            raise RequestException(
+                msg = "Duplicate registration attempt",
+                code = ExceptionCodes.BAD_REQUEST
+            )
+        
+        else:
+            logging.warning(f"Username '{uname}' is already taken by IP {existing_user.ip}. Registration attempt from IP {ip} rejected.")
+            raise RequestException(
+                msg = "Username is already taken",
+                code = ExceptionCodes.USER_EXISTS
+            )
+
+    user = UserState(
+        uname = uname,
+        ip = ip,
+        socket = client_socket,
+        last_seen = time.time()
+    )
+
+    users[uname] = user
+    sockets_to_users[client_socket] = user
+
+    logging.info(f"User '{uname}' successfully registered with Ip {ip}.")
+    return user
+
+def unregister_user(client_socket: socket.socket) -> None:
+
+    """ Safely cleans up and removes the user from all memory registery"""
+
+    user = sockets_to_users.pop(client_socket, None)
+
+    if user:
+
+        users.pop(user.uname, None)
+        logging.info(f"User '{user.uname}' disconnected with IP: {user.ip}.")
+    else:
+        
+        logging.debug("Unregistered socket connection closed.")
+
+    try:
+        client_socket.close()
+    except OSError as e:
+        logging.error(f"Error closing socket: {e}")
 
 
 
