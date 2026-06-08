@@ -138,15 +138,15 @@ def register_user(uname: str, ip: str, client_socket: socket.socket ) -> UserSta
     users[uname] = user
     sockets_to_users[client_socket] = user
 
-    logging.info(f"User '{uname}' successfully registered with Ip {ip}.")
+    logging.info(f"User '{uname}' successfully registered with IP {ip}.")
     return user
 
 def unregister_user(client_socket: socket.socket) -> None:
 
-    """ Safely cleans up and removes the user from all memory registery"""
+    """ Safely cleans up and removes the user from all memory registry"""
 
     if client_socket == server_socket:
-        logging.warning("Server tried to unregister the listerner socket.")
+        logging.warning("Server tried to unregister the listener socket.")
         return
 
     #retrieves the value if exist or returns None.
