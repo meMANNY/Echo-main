@@ -20,7 +20,7 @@ from utils.constants import FMT,HEADER_MSG_LEN,HEADER_TYPE_LEN,SERVER_RECV_PORT
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.helpers import item_search, update_file_hash
 from utils.socket_functions import get_self_ip
-from utils.protocol import recvall, send_message, receive_message
+from utils.protocol import recvall, send_message, receive_message,send_error
 from utils.types import DBData, DirData, HeaderCode, ItemSearchResult, Message, SocketMessage, UpdateHashParams
 
 IP = get_self_ip()
@@ -194,24 +194,53 @@ def accept_new_connection() -> None:
 
 def read_handler(notified_socket: socket.socket) -> None:
 
-    """ TEMPORARY STUB - real implementation is STEP 3.1.5.
-
-    Reads one message so a readable socket doesn't spin the select loop,
-    logs it, and cleans up on disconnect. The registration gate (B1/B2)
-    and per-HeaderCode dispatch are still to be written. """
+    """ Serves requests received from peers """
 
     try:
+        peer_ip = notified_socket.getpeername()[0]
+    except OSError as e:
+        #if the socket is broken, cleanup and exit
+        unregister_user(notified_socket)
+        return
+    
+    try:
+
         request = receive_message(notified_socket)
-        logging.info(f"Received {request['type']} from {notified_socket.getpeername()[0]} (handlers not implemented yet)")
+        user = sockets_to_users.get(notified_socket)
+
+        if user is None:
+
+            #Gate B1: Sender is not registered
+            if request["type"] != HeaderCode.NEW_CONNECTION:
+                raise RequestException (
+                    msg = "Unauthorised: You must register first",
+                    code= ExceptionCodes.UNAUTHORIZED
+                )
+
+            username = request["query"].decode(FMT)
+            logging.debug(msg=f"Registration for user {username}")
+            register_user(username, peer_ip, notified_socket)
+            send_message(notified_socket,HeaderCode.NEW_CONNECTION)
+
+        else:
+            #Gate B2: Sender is registered
+            user.last_seen = time.time()
+            logging.info(f"Dispatching message {request['type']} from user'{user.uname}'")
+
+            match request["type"]:
+                case _:
+                    logging.warning(f"Handler for {request['type']} is not implemented yet.")
+                
 
     except RequestException as e:
         if e.code == ExceptionCodes.DISCONNECT:
             unregister_user(notified_socket)
         else:
-            logging.error(f"Request error: {e.msg}")
+            logging.error(f"Protocol request error from user: {e.msg}")
+            send_error(notified_socket,e)
 
     except OSError as e:
-        logging.error(f"OS error on socket: {e}")
+        logging.info(f"Connection lost ungracefully from user: {e}")
         unregister_user(notified_socket)
 
 

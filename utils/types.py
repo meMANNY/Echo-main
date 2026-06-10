@@ -15,6 +15,7 @@ class HeaderCode(Enum):
     HEARTBEAT_REQUEST = "H"
     REQUEST_UNAME = "R"
     MESSAGE = "m"
+    NEW_CONNECTION = "n"
     REQUEST_IP = "r"
     SHARE_DATA = "d"
     UPDATE_HASH = "h"
