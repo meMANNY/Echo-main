@@ -198,7 +198,7 @@ def read_handler(notified_socket: socket.socket) -> None:
 
     try:
         peer_ip = notified_socket.getpeername()[0]
-    except OSError as e:
+    except OSError :
         #if the socket is broken, cleanup and exit
         unregister_user(notified_socket)
         return
@@ -217,6 +217,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                     code= ExceptionCodes.UNAUTHORIZED
                 )
 
+
             username = request["query"].decode(FMT)
             logging.debug(msg=f"Registration for user {username}")
             register_user(username, peer_ip, notified_socket)
@@ -229,7 +230,7 @@ def read_handler(notified_socket: socket.socket) -> None:
 
             match request["type"]:
                 case _:
-                    logging.warning(f"Handler for {request['type']} is not implemented yet.")
+                    logging.debug(f"Handler for {request['type']} is not implemented yet.")
                 
 
     except RequestException as e:
@@ -237,10 +238,17 @@ def read_handler(notified_socket: socket.socket) -> None:
             unregister_user(notified_socket)
         else:
             logging.error(f"Protocol request error from user: {e.msg}")
-            send_error(notified_socket,e)
+            send_error(notified_socket, e)
+            # Drop a socket that tried to skip the registration gate so a
+            # misbehaving client can't hammer us. send_error FIRST (the client
+            # learns why), THEN close. Registration collisions
+            # (USER_EXISTS / BAD_REQUEST) stay open so the client can retry.
+            if e.code == ExceptionCodes.UNAUTHORIZED:
+                unregister_user(notified_socket)
+
 
     except OSError as e:
-        logging.info(f"Connection lost ungracefully from user: {e}")
+        logging.warning(f"Connection lost ungracefully from user: {e}")
         unregister_user(notified_socket)
 
 
