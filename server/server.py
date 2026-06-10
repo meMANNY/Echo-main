@@ -4,6 +4,7 @@ import logging
 import sys
 import os
 import time
+import select
 
 from datetime import datetime
 from pathlib import Path
@@ -170,6 +171,91 @@ def unregister_user(client_socket: socket.socket) -> None:
     except OSError as e:
         logging.error(f"Error closing socket: {e}")
 
+
+
+
+
+
+def accept_new_connection() -> None:
+
+    """ Accepts a new client connection and adds it to the monitored sockets.
+
+    No registration here - that happens when the client sends NEW_CONNECTION. """
+
+    try:
+        conn, addr = server_socket.accept()
+        sockets_list.append(conn)
+        logging.info(f"New connection accepted from {addr[0]}:{addr[1]}")
+
+    except OSError as e:
+        logging.error(f"OS error has occured for socket:{e}")
+        return
+
+
+def read_handler(notified_socket: socket.socket) -> None:
+
+    """ TEMPORARY STUB - real implementation is STEP 3.1.5.
+
+    Reads one message so a readable socket doesn't spin the select loop,
+    logs it, and cleans up on disconnect. The registration gate (B1/B2)
+    and per-HeaderCode dispatch are still to be written. """
+
+    try:
+        request = receive_message(notified_socket)
+        logging.info(f"Received {request['type']} from {notified_socket.getpeername()[0]} (handlers not implemented yet)")
+
+    except RequestException as e:
+        if e.code == ExceptionCodes.DISCONNECT:
+            unregister_user(notified_socket)
+        else:
+            logging.error(f"Request error: {e.msg}")
+
+    except OSError as e:
+        logging.error(f"OS error on socket: {e}")
+        unregister_user(notified_socket)
+
+
+def cleanup() -> None:
+
+    """ Closes every socket and the database on shutdown. """
+
+    # iterate over a copy - unregister_user mutates sockets_list
+    for sock in sockets_list.copy():
+        if sock is server_socket:
+            continue
+        unregister_user(sock)
+
+    server_socket.close()
+    echo_db.close()
+    logging.info("All sockets closed.")
+
+
+def main() -> None:
+
+    while True:
+        try:
+            readable, _, errored = select.select(sockets_list, [], sockets_list, 0.1)
+
+            for notified_socket in readable:
+
+                if notified_socket == server_socket:
+                    accept_new_connection()
+                else:
+                    read_handler(notified_socket)
+
+            for notified_socket in errored:
+                logging.warning("OS exception occurred on socket")
+                unregister_user(notified_socket)
+
+        except KeyboardInterrupt:
+            logging.info("Server shutting down....")
+            cleanup()
+            break
+
+
+if __name__ == "__main__":
+    main()
+    
 
 
 
