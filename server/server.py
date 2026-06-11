@@ -235,7 +235,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                     #Caller asks for his own IP
                     if target_uname == user.uname:
                         raise RequestException(
-                        msg="Cannot Request your own IP",
+                        msg="Cannot request your own IP",
                         code= ExceptionCodes.BAD_REQUEST)
                     
                     target_user = users.get(target_uname)
@@ -247,6 +247,33 @@ def read_handler(notified_socket: socket.socket) -> None:
                     #Send IP as text response
                     send_text(notified_socket,HeaderCode.REQUEST_IP,target_user.ip)
 
+                #Get a peer's username from their IP
+                case HeaderCode.REQUEST_UNAME:
+                    
+                    target_ip = request["query"].decode(FMT)
+
+                    #Caller asks for his own username
+                    if target_ip == user.ip:
+                        raise RequestException(
+                            msg="Cannot request your own username",
+                            code= ExceptionCodes.BAD_REQUEST
+                        )
+
+                    #O(n) scan over users dict to find matching IP
+                    target_user = None
+
+                    for u in users.values():
+                        if u.ip == target_ip:
+                            target_user = u
+                            break
+                    
+                    if not target_user:
+                        raise RequestException(
+                            msg= f"IP address {target_ip} is not registered",
+                            code=ExceptionCodes.NOT_FOUND
+                        )
+                    #Send username as a text response
+                    send_text(notified_socket,HeaderCode.REQUEST_UNAME,target_user.uname)
 
 
                 
