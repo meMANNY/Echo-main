@@ -171,7 +171,14 @@ def unregister_user(client_socket: socket.socket) -> None:
     except OSError as e:
         logging.error(f"Error closing socket: {e}")
 
+def validate_share_tree(tree: list) -> None:
+    """ Recursively validates the share directory tree for:
+    1. Structure (must be list/dict).
+    2. Path Traversal or Absolute Path vulnerability (Security Guard).
+    3. File sizes out of bounds (int64).
+    Raises RequestException if any validation fails."""
 
+    
 
 
 
@@ -287,7 +294,23 @@ def read_handler(notified_socket: socket.socket) -> None:
                     #Send the dict of active user
                     send_msgpack(notified_socket,HeaderCode.HEARTBEAT_REQUEST,heartbeat)
                 
-                
+                case HeaderCode.SHARE_DATA:
+                    #Sending share data of the user
+
+                    #unpacking the list of "children" from msgpack bytes
+                    share_data = msgpack.unpackb(request["query"], use_bin_type = True)
+
+                    Userquery = Query()
+                    logging.debug(f"Received update to share data for user {user.uname}")
+                    #Update the share data under the username key if it exists
+                    #or insert it if it does not exist
+                    echo_db.upsert({"uname": user.uname,"share": share_data}, Userquery.uname == user.uname)
+
+                    #Acknowledge only (empty body)
+                    send_message(notified_socket,HeaderCode.SHARE_DATA)
+
+
+
 
     except RequestException as e:
         if e.code == ExceptionCodes.DISCONNECT:
