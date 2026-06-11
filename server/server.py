@@ -20,7 +20,7 @@ from utils.constants import FMT,HEADER_MSG_LEN,HEADER_TYPE_LEN,SERVER_RECV_PORT
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.helpers import item_search, update_file_hash
 from utils.socket_functions import get_self_ip
-from utils.protocol import recvall, send_message, receive_message,send_error
+from utils.protocol import recvall, send_message, receive_message,send_error,send_text,send_msgpack
 from utils.types import DBData, DirData, HeaderCode, ItemSearchResult, Message, SocketMessage, UpdateHashParams
 
 IP = get_self_ip()
@@ -229,8 +229,27 @@ def read_handler(notified_socket: socket.socket) -> None:
             logging.info(f"Dispatching message {request['type']} from user'{user.uname}'")
 
             match request["type"]:
-                case _:
-                    logging.debug(f"Handler for {request['type']} is not implemented yet.")
+                case HeaderCode.REQUEST_IP:
+                    #Lookup the IP in the mapping
+                    target_uname = request["query"].decode(FMT)
+                    #Caller asks for his own IP
+                    if target_uname == user.uname:
+                        raise RequestException(
+                        msg="Cannot Request your own IP",
+                        code= ExceptionCodes.BAD_REQUEST)
+                    
+                    target_user = users.get(target_uname)
+                    if not target_user:
+                        raise RequestException(
+                            msg=f"User '{target_uname}' is offline",
+                            code= ExceptionCodes.NOT_FOUND
+                        )
+                    #Send IP as text response
+                    send_text(notified_socket,HeaderCode.REQUEST_IP,target_user.ip)
+
+
+
+                
                 
 
     except RequestException as e:
