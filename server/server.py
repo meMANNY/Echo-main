@@ -276,6 +276,16 @@ def read_handler(notified_socket: socket.socket) -> None:
                     send_text(notified_socket,HeaderCode.REQUEST_UNAME,target_user.uname)
 
 
+                case HeaderCode.HEARTBEAT_REQUEST:
+                    #Update the user's online status
+
+                    #Build up the dictionary of all the other user last seen time.
+                    heartbeat = {
+                        other_uname: other_user.last_seen for other_uname,other_user in users.items() if other_uname != user.uname
+                    }
+
+                    #Send the dict of active user
+                    send_msgpack(notified_socket,HeaderCode.HEARTBEAT_REQUEST,heartbeat)
                 
                 
 
