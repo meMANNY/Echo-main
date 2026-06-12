@@ -421,9 +421,53 @@ def read_handler(notified_socket: socket.socket) -> None:
                         #Send the share data packed in msgpack
                         send_msgpack(notified_socket,HeaderCode.FILE_BROWSE,records[0])
 
+                case HeaderCode.UPDATE_HASH:
+                    #Updating the hash of a file item
+                    try:
 
+                        params = msgpack.unpackb(request["query"])
+                        filepath = params["filepath"]
+                        new_hash = params["hash"]
+                    except Exception as e:
+                        logging.warning(f"Failed to unpack update_hash payload from {user.uname}")
+                        raise RequestException(
+                            msg="Malformed update_hash payload",
+                            code=ExceptionCodes.BAD_REQUEST
+                        )
 
+                    Userquery = Query()
+                    record = echo_db.search(Userquery.uname == user.uname)
 
+                    if not record:
+                        raise RequestException(
+                            msg="No share directory registered.",
+                            code=ExceptionCodes.NOT_FOUND
+                        )
+                    
+                    share = record[0]["share"]
+
+                    #Mutate the tree in-place
+                    update_file_hash(share,filepath,new_hash)
+
+                    echo_db.update({"share": share},Userquery.uname == user.uname)
+
+                    send_message(notified_socket,HeaderCode.UPDATE_HASH)
+
+                case HeaderCode.ERROR:
+                    #Client sent an error
+                    try:
+                        exc_dict = msgpack.unpackb(request["query"])
+                        logging.warning(f"Error reported by client '{user.uname}': {exc_dict.get('msg')}")
+                    except Exception as e:
+                        #Not raising exception as the server will send error packet back to client causing a loop.
+                        logging.warning("Received malformed error payload")
+
+                case _:
+                    logging.warning(f"bad request from user.")
+                    raise RequestException(
+                        msg=f"Bad request from {user.uname}",
+                        code=ExceptionCodes.BAD_REQUEST
+                    )
 
     except RequestException as e:
         if e.code == ExceptionCodes.DISCONNECT:
