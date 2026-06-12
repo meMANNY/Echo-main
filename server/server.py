@@ -8,7 +8,7 @@ import select
 
 from datetime import datetime
 from pathlib import Path
-from pprint import pprint
+from pprint import pformat
 
 #imports (PyPI)
 import msgpack
@@ -375,6 +375,27 @@ def read_handler(notified_socket: socket.socket) -> None:
 
                     #Acknowledge only (empty body)
                     send_message(notified_socket,HeaderCode.SHARE_DATA)
+
+                
+                case HeaderCode.FILE_SEARCH:
+                    #Fuzzy search for files across the network.
+
+                    search_qrt = request["query"].decode(FMT).lower()
+                    all_results = []
+
+                    #Iterating over all user records
+                    for doc in echo_db.all():
+                        if doc["uname"] == user.uname:
+                            continue
+                        
+                        results = []
+                        item_search(doc["share"],results,search_qrt,doc["uname"])
+                        all_results.extend(results)
+
+                    logging.debug(f"{pformat(results)}")
+                    
+                    #Send back the search result list back to the user.
+                    send_msgpack(notified_socket,HeaderCode.FILE_SEARCH,all_results)
 
 
 
