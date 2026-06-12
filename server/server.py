@@ -392,10 +392,35 @@ def read_handler(notified_socket: socket.socket) -> None:
                         item_search(doc["share"],results,search_qrt,doc["uname"])
                         all_results.extend(results)
 
-                    logging.debug(f"{pformat(results)}")
+                    logging.debug(f"{pformat(all_results)}")
                     
                     #Send back the search result list back to the user.
                     send_msgpack(notified_socket,HeaderCode.FILE_SEARCH,all_results)
+
+                case HeaderCode.FILE_BROWSE:
+                    #Retrieve the shared data of a user.
+                    target_uname = request["query"].decode(FMT)
+
+                    #Distinguish "user doesn't exist" from "user exists but
+                    #hasn't uploaded share data yet". Only an unknown user is
+                    #a NOT_FOUND; a known user with no data browses as empty.
+                    if target_uname not in users:
+                        raise RequestException(
+                            msg=f"User '{target_uname}' is not online",
+                            code=ExceptionCodes.NOT_FOUND
+                        )
+
+                    Userquery = Query()
+                    records: list[DirData] = echo_db.search(Userquery.uname == target_uname)
+
+                    #Registered but no share row yet -> return an empty share
+                    #gracefully, keeping the same response shape as a hit.
+                    if not records:
+                        send_msgpack(notified_socket,HeaderCode.FILE_BROWSE,{"uname": target_uname, "share": []})
+                    else:
+                        #Send the share data packed in msgpack
+                        send_msgpack(notified_socket,HeaderCode.FILE_BROWSE,records[0])
+
 
 
 
