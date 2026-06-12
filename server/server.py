@@ -423,6 +423,15 @@ def read_handler(notified_socket: socket.socket) -> None:
 
                 case HeaderCode.UPDATE_HASH:
                     #Updating the hash of a file item
+                    """
+                    When a client first scans its share folder, it doesn't compute
+                    hashes (would be slow). It sends share data with hash=None.
+                    - Hashes are computed lazily when someone tries to download.
+                    - The downloader gets the hash, the uploader's server-side record
+                        is updated so future downloaders don't have to recompute."""
+
+
+
                     try:
 
                         params = msgpack.unpackb(request["query"])
