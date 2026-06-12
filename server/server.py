@@ -54,7 +54,7 @@ file_handler.setFormatter(log_format) #allows me to have a record of all events 
 
 
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO) # Set the logging level to INFO
+root_logger.setLevel(logging.DEBUG) # Set the logging level to DEBUG
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
 
@@ -281,7 +281,7 @@ def read_handler(notified_socket: socket.socket) -> None:
         else:
             #Gate B2: Sender is registered
             user.last_seen = time.time()
-            logging.info(f"Dispatching message {request['type']} from user'{user.uname}'")
+            logging.debug(f"Dispatching message {request['type']} from user'{user.uname}'")
 
             match request["type"]:
                 case HeaderCode.REQUEST_IP:
@@ -483,7 +483,15 @@ def read_handler(notified_socket: socket.socket) -> None:
             unregister_user(notified_socket)
         else:
             logging.error(f"Protocol request error from user: {e.msg}")
-            send_error(notified_socket, e)
+            # The client may have died between the read and this reply. If the
+            # error-reply itself fails, the socket is gone - clean up instead
+            # of letting the OSError escape to main() and crash the server.
+            try:
+                send_error(notified_socket, e)
+            except OSError as send_err:
+                logging.warning(f"Failed to send error to client, dropping socket: {send_err}")
+                unregister_user(notified_socket)
+                return
             # Drop a socket that tried to skip the registration gate so a
             # misbehaving client can't hammer us. send_error FIRST (the client
             # learns why), THEN close. Registration collisions
@@ -495,6 +503,21 @@ def read_handler(notified_socket: socket.socket) -> None:
     except OSError as e:
         logging.warning(f"Connection lost ungracefully from user: {e}")
         unregister_user(notified_socket)
+
+    except Exception as e:
+        # Catch-all for unexpected bugs in a handler (KeyError, re.error, etc.).
+        # A single buggy request must NOT crash the whole server, so we log it
+        # loudly (this is a bug to fix) and reply with a generic BAD_REQUEST so
+        # the client unblocks. Never re-raise. The reply may itself fail if the
+        # socket died, so guard it and fall back to cleanup.
+        logging.error(f"Unexpected error while handling request: {e}", exc_info=True)
+        try:
+            send_error(
+                notified_socket,
+                RequestException(msg="Internal server error", code=ExceptionCodes.BAD_REQUEST),
+            )
+        except OSError:
+            unregister_user(notified_socket)
 
 
 def cleanup() -> None:
