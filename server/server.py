@@ -178,9 +178,57 @@ def validate_share_tree(tree: list) -> None:
     3. File sizes out of bounds (int64).
     Raises RequestException if any validation fails."""
 
-    
+    if not isinstance (tree, list):
+        raise RequestException(
+            msg="Invalid share structure: root must be a list",
+            code=ExceptionCodes.BAD_REQUEST
+        )
 
+    for item in tree:
+        #Guard: Every entry must be a dict
+        if not isinstance(item,dict):
+            raise RequestException(
+                msg="Invalid share item: entries must be a dict",
+                code=ExceptionCodes.BAD_REQUEST
+            )
+        path = item.get("path")
+        item_type = item.get("type")
 
+        #Path Validation
+        if not path or not isinstance(path,str):
+            raise RequestException(
+                msg="Malformed share item: missing or invalid path string",
+                code=ExceptionCodes.BAD_REQUEST
+            )
+        #is_absolute = full path from drive root
+        if Path(path).is_absolute() or ".." in path:
+            raise RequestException(
+                msg="Security Warning: absolute path detected",
+                code=ExceptionCodes.BAD_REQUEST
+            )
+        
+
+        #3 File Size Validation
+        if item_type == "file":
+            size = item.get("size")
+
+            #size must fit in 64 bit-int
+            if not isinstance(size,int) or size < 0 or size >= 2**63:
+                raise RequestException( 
+                    msg=f"Invalid file size for item: {path}",
+                    code=ExceptionCodes.BAD_REQUEST
+                )
+            
+        elif item_type == "directory":
+            children = item.get("children",[])
+            #recursive check
+            validate_share_tree(children)
+        
+        else: 
+            raise RequestException(
+                msg= f"Unknown file type: {item_type}",
+                code=ExceptionCodes.BAD_REQUEST
+            )
 
 
 def accept_new_connection() -> None:
@@ -297,8 +345,27 @@ def read_handler(notified_socket: socket.socket) -> None:
                 case HeaderCode.SHARE_DATA:
                     #Sending share data of the user
 
+                    #Implementing new logic: DoS Guard -> reject a package if the payload is huge!
+                    MAX_PAYLOAD_SIZE = 10*1024*1024 #10Mb
+                    if len(request["query"]) > MAX_PAYLOAD_SIZE:
+                        raise RequestException(
+                            msg="Share data payload size exceeds size limits.",
+                            code=ExceptionCodes.BAD_REQUEST
+                        )
+                    
                     #unpacking the list of "children" from msgpack bytes
-                    share_data = msgpack.unpackb(request["query"], use_bin_type = True)
+                    try:
+                        share_data = msgpack.unpackb(request["query"])
+                    except Exception as e:
+                        logging.warning(f"Failed to unpack msg payload from '{user.uname}': {e}")
+                        raise RequestException(
+                            msg="Malformed message payload",
+                            code=ExceptionCodes.BAD_REQUEST
+                        )
+
+
+                    #Calling the new logic function here
+                    validate_share_tree(share_data)
 
                     Userquery = Query()
                     logging.debug(f"Received update to share data for user {user.uname}")

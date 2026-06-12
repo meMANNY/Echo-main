@@ -72,7 +72,8 @@ def path_to_dict(path: Path, share_folder_path: str) -> DirData:
     that can be sent over the network.
     """
     d: DirData = {
-        "path": str(path).removeprefix(share_folder_path + "/"),
+        #"path": str(path).removeprefix(share_folder_path + "/"),
+        "path": Path(path).relative_to(Path(share_folder_path)).as_posix(),
         "name" : path.name,
         "hash" : None,
         "compression": CompressionMethod.NONE.value,
