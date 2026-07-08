@@ -123,6 +123,77 @@ class ClientCore:
         except OSError as e:
             logger.error(f"Failed to save user settings: {e}")
     
+    def connect_to_server(self,server_ip: str) -> bool:
+        """ Established a socket connection to the central server."""
+        with self.server_lock:
+            #IF already connected, close the existing socket before creating a new one
+            if self.server_socket:
+                try:
+                    self.server_socket.close()
+                    logger.debug("Existing server socket closed.")
+                except OSError as e:
+                    logger.error(f"Error closing existing server socket: {e}", exc_info=True)
+                    pass
 
+            try:
+                self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+                #Bind local port if requested or let os choose
+                self.server_socket.connect((server_ip, SERVER_RECV_PORT))
+                self.settings["server_ip"] = server_ip
+                self.save_settings(self.settings)  # Persist the new server IP
+                logger.info(f"Connected to server at {server_ip}:{SERVER_RECV_PORT}")
+                return True
+            except OSError as e:
+                self.server_socket = None
+                logger.error(f"Failed to connect to server at {server_ip}:{SERVER_RECV_PORT}: {e}", exc_info=True)
+                return False
+        
+    def register(self, username: str) -> bool:
+        """ Performs the new connection registration with the server. Returns True if successful, False otherwise. """
+
+        if not self.server_socket:
+            logger.error("Cannot register: No server connection established.")
+            return False
+        
+        with self.server_lock:
+            try:
+                #Send registration request
+                send_text(self.server_socket, HeaderCode.NEW_CONNECTION,username)
+
+                #Wait for server response
+                response = receive_message(self.server_socket)
+
+                if response["type"] == HeaderCode.NEW_CONNECTION:
+                    logger.info(f"Registration successful for username='{username}'")
+                    self.settings["uname"] = username
+                    self.save_settings(self.settings)  # Persist the new username
+                    self.connected = True
+                    self.first_run = False  # Update first_run flag after successful registration
+                    return True
+                
+            except RequestException as e:
+                if e.code == ExceptionCodes.USER_EXISTS:
+                    logger.error(f"Registration failed: Username '{username}' already exists.")
+                elif e.code == ExceptionCodes.BAD_REQUEST:
+                    #reconnection
+                    self.settings["uname"] = username
+                    self.save_settings(self.settings)  # Persist the new username
+                    self.connected = True
+                    logger.info(f"Reconnection successful for username='{username}'")
+                    return True
+                
+                else:
+                    logger.error(f"Registration failed with error code {e.code}: {e}")
+                
+                return False
             
+            except OSError as e:
+                logger.error(f"Registration failed due to socket error: {e}", exc_info=True)
+                self.server_socket = None
+                return False
+
+    
+
+
