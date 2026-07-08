@@ -139,15 +139,29 @@ class ClientCore:
                 self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+                CONNECTION_TIMEOUT = 5  # seconds
+                self.server_socket.settimeout(CONNECTION_TIMEOUT)
+                logger.info(f"Attempting to connect to server at {server_ip}:{SERVER_RECV_PORT} with timeout {CONNECTION_TIMEOUT}s...")
                 #Bind local port if requested or let os choose
                 self.server_socket.connect((server_ip, SERVER_RECV_PORT))
+                self.server_socket.settimeout(None)  # Remove timeout after successful connection
                 self.settings["server_ip"] = server_ip
                 self.save_settings(self.settings)  # Persist the new server IP
                 logger.info(f"Connected to server at {server_ip}:{SERVER_RECV_PORT}")
                 return True
-            except OSError as e:
+            except (socket.timeout, OSError) as e:
+                if self.server_socket:
+                    try:
+                        self.server_socket.close()
+                        logger.debug("Server socket closed after failed connection attempt.")
+                    except OSError as close_error:
+                        logger.error(f"Error closing server socket after failed connection: {close_error}", exc_info=True)
+                        pass
                 self.server_socket = None
-                logger.error(f"Failed to connect to server at {server_ip}:{SERVER_RECV_PORT}: {e}", exc_info=True)
+                if isinstance(e, socket.timeout):
+                    logger.error(f"Connection to server at {server_ip}:{SERVER_RECV_PORT} timed out.")
+                else:
+                    logger.error(f"Failed to connect to server at {server_ip}:{SERVER_RECV_PORT}: {e}", exc_info=True)
                 return False
         
     def register(self, username: str) -> bool:
@@ -175,7 +189,7 @@ class ClientCore:
                 
             except RequestException as e:
                 if e.code == ExceptionCodes.USER_EXISTS:
-                    logger.error(f"Registration failed: Username '{username}' already exists.")
+                    logger.warning(f"Registration failed: Username '{username}' already taken by another host.")
                 elif e.code == ExceptionCodes.BAD_REQUEST:
                     #reconnection
                     self.settings["uname"] = username
