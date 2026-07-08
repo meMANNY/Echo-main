@@ -130,10 +130,11 @@ class ClientCore:
             if self.server_socket:
                 try:
                     self.server_socket.close()
-                    logger.debug("Existing server socket closed.")
+                    self.connected = False
+                    logger.info("Closed existing server socket before establishing a new connection.")
                 except OSError as e:
                     logger.error(f"Error closing existing server socket: {e}", exc_info=True)
-                    pass
+                    
 
             try:
                 self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -156,7 +157,7 @@ class ClientCore:
                         logger.debug("Server socket closed after failed connection attempt.")
                     except OSError as close_error:
                         logger.error(f"Error closing server socket after failed connection: {close_error}", exc_info=True)
-                        pass
+                        
                 self.server_socket = None
                 if isinstance(e, socket.timeout):
                     logger.error(f"Connection to server at {server_ip}:{SERVER_RECV_PORT} timed out.")
@@ -164,6 +165,19 @@ class ClientCore:
                     logger.error(f"Failed to connect to server at {server_ip}:{SERVER_RECV_PORT}: {e}", exc_info=True)
                 return False
         
+    def _teardown_server_socket(self) -> None:
+        """ Closes and clears the server socket after a transport failure.
+        Caller must already hold server_lock. """
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+                logger.debug("Server socket closed after transport failure.")
+            except OSError as e:
+                logger.error(f"Error closing server socket: {e}", exc_info=True)
+        self.server_socket = None
+        self.connected = False
+
     def register(self, username: str) -> bool:
         """ Performs the new connection registration with the server. Returns True if successful, False otherwise. """
 
@@ -187,6 +201,10 @@ class ClientCore:
                     self.first_run = False  # Update first_run flag after successful registration
                     return True
                 
+                else:
+                    logger.error(f"Unexpected response from server during registration: {response}")
+                    return False
+                
             except RequestException as e:
                 if e.code == ExceptionCodes.USER_EXISTS:
                     logger.warning(f"Registration failed: Username '{username}' already taken by another host.")
@@ -195,17 +213,29 @@ class ClientCore:
                     self.settings["uname"] = username
                     self.save_settings(self.settings)  # Persist the new username
                     self.connected = True
+                    self.first_run = False  # Update first_run flag after successful registration
                     logger.info(f"Reconnection successful for username='{username}'")
                     return True
-                
+
+                elif e.code in (
+                    ExceptionCodes.DISCONNECT,
+                    ExceptionCodes.INVALID_HEADER,
+                    ExceptionCodes.INCOMPLETE,
+                ):
+                    #Transport-level failure (receive_message wraps recv-side
+                    #OSErrors as DISCONNECT) — the socket is no longer
+                    #trustworthy, so tear it down like the OSError path below.
+                    logger.error(f"Connection to server lost during registration: {e.msg}")
+                    self._teardown_server_socket()
+
                 else:
                     logger.error(f"Registration failed with error code {e.code}: {e}")
-                
+
                 return False
             
             except OSError as e:
                 logger.error(f"Registration failed due to socket error: {e}", exc_info=True)
-                self.server_socket = None
+                self._teardown_server_socket()
                 return False
 
     
