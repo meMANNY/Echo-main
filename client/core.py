@@ -265,13 +265,13 @@ class ClientCore:
         with self.server_lock:
             try:
                 #update_share_data walks share_path, msgpacks the children,
-                #sends SHARE_DATA and reads the ack. It swallows RequestException
-                #internally (logs only), so a recv-side failure won't surface
-                #here; a send-side OSError does and is handled below.
+                #sends SHARE_DATA and reads the ack. Transport failures surface
+                #as OSError (send side) or RequestException (recv side); both are
+                #caught below and trigger a teardown.
                 update_share_data(share_path, self.server_socket)
                 logger.info(f"Published share data from '{share_path}' to the server.")
                 return True
-            except OSError as e:
+            except (OSError, RequestException) as e:
                 logger.error(f"Failed to publish share data due to socket error: {e}", exc_info=True)
                 self._teardown_server_socket()
                 return False
