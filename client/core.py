@@ -43,13 +43,12 @@ class ClientCore:
 
         #Peer tracking
 
-        self.online_peers: dict[str, dict] = {}  # Dictionary to track online peers and their details
+        self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
 
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
         self.settings: UserSettings = self._load_settings()
 
-        self.online_peers: dict[str, float] = {}  # Dictionary to track online peers and their details
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
         self.heartbeat_thread.start()
         logger.info("Heartbeat thread started.")
@@ -288,21 +287,21 @@ class ClientCore:
                         send_text(self.server_socket,HeaderCode.HEARTBEAT_REQUEST,"1")
                         reply = receive_message(self.server_socket)
 
-                    if reply["type"] == HeaderCode.HEARTBEAT_RESPONSE:
+                    if reply["type"] == HeaderCode.HEARTBEAT_REQUEST:
                         # Update online peers based on the server's response
-                        peer_status = msgpack.unpackb(reply["query"],use_bin_type=True)
+                        peer_status = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded dict
                         self._update_online_peers(peer_status)
                 except RequestException as e:
-                    logger.warning(f"Heartbeat failed with RequestException: {e.msg}")
-
                     if e.code in (
                         ExceptionCodes.DISCONNECT,
                         ExceptionCodes.INVALID_HEADER,
                         ExceptionCodes.INCOMPLETE,
                     ):
-                        logger.error("Connection to server lost during heartbeat. Tearing down socket.")
+                        logger.error(f"Connection to server lost during heartbeat ({e.code.name}): {e.msg}. Tearing down socket.")
                         with self.server_lock:
                             self._teardown_server_socket()
+                    else:
+                        logger.warning(f"Heartbeat failed with RequestException: {e.msg}")
                 except OSError as e:
                     logger.error(f"Heartbeat failed due to network error: {e}", exc_info=True)
                     with self.server_lock:
@@ -310,6 +309,24 @@ class ClientCore:
                 except Exception as e:
                     logger.error(f"Unexpected error in heartbeat loop: {e}", exc_info=True)
             time.sleep(HEARTBEAT_TIMER)
+    
+    def _update_online_peers(self, peer_status: dict) -> None:
+
+        """Filters the online peers based on the last heartbeat timestamp and updates the online_peers dictionary."""
+
+        now = time.time()
+        active = {} # Temporary dictionary to hold active peers
+
+        for username, last_seen in peer_status.items():
+            # If the last seen timestamp is within the ONLINE_TIMEOUT, consider the peer active
+            if now - last_seen < ONLINE_TIMEOUT:
+                active[username] = last_seen
+
+        # Update the online_peers dictionary with the active peers
+        self.online_peers = active
+        logger.debug(f"Updated online peers: {list(self.online_peers.keys())}")
+
+
 
 
 
