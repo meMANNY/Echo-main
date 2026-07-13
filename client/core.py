@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import msgpack
+
 from utils.constants import (
     CLIENT_SEND_PORT,
     FMT,
@@ -16,11 +18,14 @@ from utils.constants import (
     TEMP_FOLDER_PATH,
     DIRECT_TEMP_FOLDER_PATH,
     USER_SETTINGS_PATH,
+    HEARTBEAT_TIMER,
+    ONLINE_TIMEOUT
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data
 from utils.types import UserSettings, HeaderCode
+
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,11 @@ class ClientCore:
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
         self.settings: UserSettings = self._load_settings()
+
+        self.online_peers: dict[str, float] = {}  # Dictionary to track online peers and their details
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
+        self.heartbeat_thread.start()
+        logger.info("Heartbeat thread started.")
 
         logger.info(
             f"ClientCore initialized (first_run={self.first_run}, "
@@ -266,7 +276,40 @@ class ClientCore:
                 logger.error(f"Failed to publish share data due to socket error: {e}", exc_info=True)
                 self._teardown_server_socket()
                 return False
+    
+    def _heartbeat_loop(self) -> None:
 
+        """Periodically sends heartbeat messages to the server and checks for online peers."""
+
+        while True:
+            if self.connected and self.server_socket:
+                try:
+                    with self.server_lock:
+                        send_text(self.server_socket,HeaderCode.HEARTBEAT_REQUEST,"1")
+                        reply = receive_message(self.server_socket)
+
+                    if reply["type"] == HeaderCode.HEARTBEAT_RESPONSE:
+                        # Update online peers based on the server's response
+                        peer_status = msgpack.unpackb(reply["query"],use_bin_type=True)
+                        self._update_online_peers(peer_status)
+                except RequestException as e:
+                    logger.warning(f"Heartbeat failed with RequestException: {e.msg}")
+
+                    if e.code in (
+                        ExceptionCodes.DISCONNECT,
+                        ExceptionCodes.INVALID_HEADER,
+                        ExceptionCodes.INCOMPLETE,
+                    ):
+                        logger.error("Connection to server lost during heartbeat. Tearing down socket.")
+                        with self.server_lock:
+                            self._teardown_server_socket()
+                except OSError as e:
+                    logger.error(f"Heartbeat failed due to network error: {e}", exc_info=True)
+                    with self.server_lock:
+                        self._teardown_server_socket()
+                except Exception as e:
+                    logger.error(f"Unexpected error in heartbeat loop: {e}", exc_info=True)
+            time.sleep(HEARTBEAT_TIMER)
 
 
 
