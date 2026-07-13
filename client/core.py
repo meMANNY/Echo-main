@@ -19,6 +19,7 @@ from utils.constants import (
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
+from utils.socket_functions import update_share_data
 from utils.types import UserSettings, HeaderCode
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,34 @@ class ClientCore:
                 self._teardown_server_socket()
                 return False
 
-    
+    def publish_share_data(self) -> bool:
+        """ Publishes the client's share folder tree to the server.
+
+        Called once after a successful registration, and again whenever the
+        share folder changes (Phase 5 wires this to a rescan action). Returns
+        True if the publish round-trip completed without a transport failure,
+        False otherwise. """
+
+        if not self.connected or not self.server_socket:
+            logger.error("Cannot publish share data: client is not registered with the server.")
+            return False
+
+        share_path = Path(self.settings["share_folder_path"])
+
+        with self.server_lock:
+            try:
+                #update_share_data walks share_path, msgpacks the children,
+                #sends SHARE_DATA and reads the ack. It swallows RequestException
+                #internally (logs only), so a recv-side failure won't surface
+                #here; a send-side OSError does and is handled below.
+                update_share_data(share_path, self.server_socket)
+                logger.info(f"Published share data from '{share_path}' to the server.")
+                return True
+            except OSError as e:
+                logger.error(f"Failed to publish share data due to socket error: {e}", exc_info=True)
+                self._teardown_server_socket()
+                return False
+
+
 
 
