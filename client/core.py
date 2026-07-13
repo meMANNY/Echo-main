@@ -23,7 +23,7 @@ from utils.constants import (
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
-from utils.socket_functions import update_share_data
+from utils.socket_functions import update_share_data,request_ip,request_uname
 from utils.types import UserSettings, HeaderCode
 
 
@@ -328,6 +328,31 @@ class ClientCore:
         # Update the online_peers dictionary with the active peers
         self.online_peers = active
         logger.debug(f"Updated online peers: {list(self.online_peers.keys())}")
+
+    def request_peer_ip(self,username: str) -> Optional[str]:
+        """ Queries the server for the IP address of a given peer username. Returns the IP address as a string if found, or None if not found or on error. """
+
+        if not self.connected or not self.server_socket:
+            logger.error("Cannot request peer IP: client is not registered with the server.")
+            return None
+        with self.server_lock:
+            
+                ip = request_ip(username,self.server_socket)
+                logger.info(f"Received IP for peer '{username}': {ip}")
+                return ip
+            
+    
+    def request_peer_uname(self,ip: str) -> Optional[str]:
+        """ Queries the server for the username of a given peer IP address. Returns the username as a string if found, or None if not found or on error. """
+
+        if not self.connected or not self.server_socket:
+            logger.error("Cannot request peer username: client is not registered with the server.")
+            return None
+        with self.server_lock:
+            
+                uname = request_uname(ip,self.server_socket)
+                logger.info(f"Received username for IP '{ip}': {uname}")
+                return uname
 
 
 
