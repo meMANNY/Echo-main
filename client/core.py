@@ -40,7 +40,10 @@ class ClientCore:
         self.connected: bool = False
 
         self.server_lock = threading.Lock()
-
+        #A lock is required to ensure that only one thread at a time can send/receive messages on the server socket. 
+        # This prevents interleaving of messages and ensures thread safety.
+        #GIL is ineffective here because socket operations can release the GIL, allowing other threads to run and potentially access the socket concurrently.
+        #so because the architecture here is to send-recv in pairs, we need to ensure that only one thread is doing that at a time.
         #Peer tracking
 
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
