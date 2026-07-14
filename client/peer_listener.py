@@ -86,6 +86,33 @@ class PeerListener:
     def _handle_chat_message(self, peer_ip: str, text: str) -> None:
 
         """ Processes inbound p2p chat messages. """
+        sender = self.core.request_uname(peer_ip) or peer_ip
+        logger.info(f"Received message from {sender}: {text}")
 
+        # 1. TODO: Append to chat history (Step 4.2.3)
+        # 2. TODO: Trigger notification (Step 4.2.4)
+    
+    def _handle_file_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
+
+        #Placeholder for session 5 file uploads
+        pass
+    
+    def _handle_direct_transfer_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
+
+        #Placeholder for session 8 pushes
+        pass
+
+    def stop(self) -> None:
+        """ Stop the peer listener and close the socket. """
+        self.running = False
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except OSError as e:
+                pass
+            self.server_socket = None
+            logger.info("Peer listener stopped.")
+        
+        
 
 
