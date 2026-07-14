@@ -17,7 +17,7 @@ class PeerListener:
         self.running = False
         self.thread = None
 
-    def start(self):
+    def start(self) -> None:
         """ Start the peer listener in a separate thread in the background. """
         
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -39,7 +39,7 @@ class PeerListener:
             
             self.server_socket = None
     
-    def _accept_loop(self):
+    def _accept_loop(self) -> None:
         """ Accept incoming connections and handle them with threads."""
 
         while self.running:
@@ -54,4 +54,38 @@ class PeerListener:
             except OSError as e:
                 break  # Socket closed, exit loop
     
+    def _handle_connection(self, conn:socket.socket, peer_ip: str):
     
+        """ Handle an incoming connection from a peer. """
+        try:
+            msg = receive_message(conn)
+
+            match msg['type']:
+                case HeaderCode.MESSAGE:
+                    #Handle incoming message
+                    self._handle_chat_message(peer_ip,msg['query'].decode(FMT))
+                case HeaderCode.FILE_REQUEST:
+                    #Handle incoming file request
+                    self._handle_file_request(conn,peer_ip,msg['query'])
+                case HeaderCode.DIRECT_TRANSFER_REQUEST:
+                    #Handle incoming direct transfer request
+                    self._handle_direct_transfer_request(conn,peer_ip,msg['query'])
+                case _:
+                    logger.warning(f"Received unknown message type from {peer_ip}: {msg['type']}")
+                    send_error(conn, RequestException("Unknown message type", ExceptionCodes.BAD_REQUEST))
+        
+        except RequestException as e:
+            logger.warning(f"RequestException while handling connection from {peer_ip}: {e.msg}")
+            send_error(conn, e)
+        except Exception as e:
+            logger.error(f"Unexpected error while handling connection from {peer_ip}: {e}", exc_info=True)
+        
+        finally:
+            conn.close()
+    
+    def _handle_chat_message(self, peer_ip: str, text: str) -> None:
+
+        """ Processes inbound p2p chat messages. """
+
+
+
