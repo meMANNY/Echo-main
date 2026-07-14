@@ -13,21 +13,21 @@ logger = logging.getLogger(__name__)
 class PeerListener:
     def __init__(self, core):
         self.core = core 
-        self.server_socket = None
+        self.listen_socket = None
         self.running = False
         self.thread = None
 
     def start(self) -> None:
         """ Start the peer listener in a separate thread in the background. """
         
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         try:
             #Bind to empty string to accept conn from any interface
 
-            self.server_socket.bind(('', CLIENT_RECV_PORT))
-            self.server_socket.listen(5)
+            self.listen_socket.bind(('', CLIENT_RECV_PORT))
+            self.listen_socket.listen(5)
             self.running = True
 
             self.thread = threading.Thread(target = self._accept_loop, daemon=True)
@@ -37,22 +37,27 @@ class PeerListener:
         except OSError as e:
             logger.error(f"Failed to start peer listener: {e}", exc_info=True)
             
-            self.server_socket = None
+            self.listen_socket = None
     
     def _accept_loop(self) -> None:
         """ Accept incoming connections and handle them with threads."""
 
         while self.running:
             try:
-                conn,addr = self.server_socket.accept()
+                conn,addr = self.listen_socket.accept()
                 logger.debug(f"Accepted connection from {addr}.")
 
-                #Handle each connection in a new thread
-                t = threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True)
+                #Handle each connection in a new thread. addr is (ip, port);
+                #pass just the ip string to the handler.
+                t = threading.Thread(target=self._handle_connection, args=(conn, addr[0]), daemon=True)
                 t.start()
             
             except OSError as e:
-                break  # Socket closed, exit loop
+                # A closed listener socket (from stop()) surfaces here as the
+                # normal shutdown path; anything else is a genuine error.
+                if self.running:
+                    logger.error(f"Peer listener accept loop error: {e}", exc_info=True)
+                break
     
     def _handle_connection(self, conn:socket.socket, peer_ip: str):
     
@@ -76,7 +81,14 @@ class PeerListener:
         
         except RequestException as e:
             logger.warning(f"RequestException while handling connection from {peer_ip}: {e.msg}")
-            send_error(conn, e)
+            # A DISCONNECT means the peer is already gone — replying would just
+            # raise OSError on a dead socket. Only reply for other errors, and
+            # guard that send too in case the connection drops mid-reply.
+            if e.code != ExceptionCodes.DISCONNECT:
+                try:
+                    send_error(conn, e)
+                except OSError as send_err:
+                    logger.debug(f"Failed to send error reply to {peer_ip}: {send_err}")
         except Exception as e:
             logger.error(f"Unexpected error while handling connection from {peer_ip}: {e}", exc_info=True)
         
@@ -86,7 +98,7 @@ class PeerListener:
     def _handle_chat_message(self, peer_ip: str, text: str) -> None:
 
         """ Processes inbound p2p chat messages. """
-        sender = self.core.request_uname(peer_ip) or peer_ip
+        sender = self.core.request_peer_uname(peer_ip) or peer_ip
         logger.info(f"Received message from {sender}: {text}")
 
         # 1. TODO: Append to chat history (Step 4.2.3)
@@ -105,12 +117,12 @@ class PeerListener:
     def stop(self) -> None:
         """ Stop the peer listener and close the socket. """
         self.running = False
-        if self.server_socket:
+        if self.listen_socket:
             try:
-                self.server_socket.close()
+                self.listen_socket.close()
             except OSError as e:
-                pass
-            self.server_socket = None
+                logger.debug(f"Error closing peer listener socket: {e}")
+            self.listen_socket = None
             logger.info("Peer listener stopped.")
         
         
