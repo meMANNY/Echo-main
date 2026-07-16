@@ -5,21 +5,22 @@ import threading
 from utils.constants import CLIENT_RECV_PORT,FMT
 from utils.exceptions import RequestException, ExceptionCodes
 from utils.protocol import receive_message, send_error
-from utils.types import HeaderCode
+from utils.types import HeaderCode, Message
 
 
 logger = logging.getLogger(__name__)
 
 class PeerListener:
     def __init__(self, core):
-        self.core = core 
+        self.core = core
         self.listen_socket = None
         self.running = False
         self.thread = None
+        self.message_history: dict[str,list[Message]] = {} #Intializes a in-memory message history dictionary to store messages per peer IP.
 
     def start(self) -> None:
         """ Start the peer listener in a separate thread in the background. """
-        
+
         self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -33,12 +34,12 @@ class PeerListener:
             self.thread = threading.Thread(target = self._accept_loop, daemon=True)
             self.thread.start()
             logger.info(f"Peer listener started on port {CLIENT_RECV_PORT}.")
-        
+
         except OSError as e:
             logger.error(f"Failed to start peer listener: {e}", exc_info=True)
-            
+
             self.listen_socket = None
-    
+
     def _accept_loop(self) -> None:
         """ Accept incoming connections and handle them with threads."""
 
@@ -51,16 +52,16 @@ class PeerListener:
                 #pass just the ip string to the handler.
                 t = threading.Thread(target=self._handle_connection, args=(conn, addr[0]), daemon=True)
                 t.start()
-            
+
             except OSError as e:
                 # A closed listener socket (from stop()) surfaces here as the
                 # normal shutdown path; anything else is a genuine error.
                 if self.running:
                     logger.error(f"Peer listener accept loop error: {e}", exc_info=True)
                 break
-    
+
     def _handle_connection(self, conn:socket.socket, peer_ip: str):
-    
+
         """ Handle an incoming connection from a peer. """
         try:
             msg = receive_message(conn)
@@ -78,7 +79,7 @@ class PeerListener:
                 case _:
                     logger.warning(f"Received unknown message type from {peer_ip}: {msg['type']}")
                     send_error(conn, RequestException("Unknown message type", ExceptionCodes.BAD_REQUEST))
-        
+
         except RequestException as e:
             logger.warning(f"RequestException while handling connection from {peer_ip}: {e.msg}")
             # A DISCONNECT means the peer is already gone — replying would just
@@ -91,10 +92,10 @@ class PeerListener:
                     logger.debug(f"Failed to send error reply to {peer_ip}: {send_err}")
         except Exception as e:
             logger.error(f"Unexpected error while handling connection from {peer_ip}: {e}", exc_info=True)
-        
+
         finally:
             conn.close()
-    
+
     def _handle_chat_message(self, peer_ip: str, text: str) -> None:
 
         """ Processes inbound p2p chat messages. """
@@ -103,12 +104,12 @@ class PeerListener:
 
         # 1. TODO: Append to chat history (Step 4.2.3)
         # 2. TODO: Trigger notification (Step 4.2.4)
-    
+
     def _handle_file_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
 
         #Placeholder for session 5 file uploads
         pass
-    
+
     def _handle_direct_transfer_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
 
         #Placeholder for session 8 pushes
@@ -124,7 +125,6 @@ class PeerListener:
                 logger.debug(f"Error closing peer listener socket: {e}")
             self.listen_socket = None
             logger.info("Peer listener stopped.")
-        
-        
+
 
 
