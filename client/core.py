@@ -19,12 +19,13 @@ from utils.constants import (
     DIRECT_TEMP_FOLDER_PATH,
     USER_SETTINGS_PATH,
     HEARTBEAT_TIMER,
-    ONLINE_TIMEOUT
+    ONLINE_TIMEOUT,
+    MESSAGE_MAX_LEN
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
-from utils.types import UserSettings, HeaderCode
+from utils.types import Message, UserSettings, HeaderCode
 
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class ClientCore:
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
         self.settings: UserSettings = self._load_settings()
-
+        self.message_history: dict[str, list[Message]] = {}  # In-memory message history per peer username
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
         self.heartbeat_thread.start()
         logger.info("Heartbeat thread started.")
@@ -353,6 +354,67 @@ class ClientCore:
                 uname = request_uname(ip,self.server_socket)
                 logger.info(f"Received username for IP '{ip}': {uname}")
                 return uname
+    
+    def add_message_to_history(self,peer_uname: str,content: str,is_self: bool) -> None:
+        """ Appends a message to the in-memory message history for a given peer. """
+
+        sender = self.settings["uname"] if is_self else peer_uname
+        if peer_uname not in self.message_history:
+            self.message_history[peer_uname] = []
+        
+        self.message_history[peer_uname].append({
+            "sender": sender,
+            "content": content
+        })
+
+        logger.debug(f"Message history updated for {peer_uname}. Total messages: {len(self.message_history[peer_uname])}")
+
+
+    def send_chat_message(self,target_uname: str,text: str) -> bool:
+        """ Sends a chat message to a peer identified by their username. """
+
+        text_bytes = text.encode(FMT)
+        if len(text_bytes) > MESSAGE_MAX_LEN:
+            logger.error(f"Message exceeds maximum length of {MESSAGE_MAX_LEN} bytes.")
+            return False
+    
+        target_ip = self.request_peer_ip(target_uname)
+        if not target_ip:
+            logger.error(f"Could not find IP for username {target_uname}.")
+            return False
+
+        peer_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        PEER_CONNECTION_TIMEOUT = 3.0  # seconds
+        peer_sock.settimeout(PEER_CONNECTION_TIMEOUT)
+
+        try:
+            logger.debug(f"Attempting to connect to {target_uname} at {target_ip}:{CLIENT_RECV_PORT}.")
+            peer_sock.connect((target_ip, CLIENT_RECV_PORT))
+
+            peer_sock.settimeout(None)  # Remove timeout after connection is established
+            send_text(peer_sock,HeaderCode.MESSAGE,text)
+
+            self.add_message_to_history(target_uname,text,is_self=True)
+            logger.info(f"Sent message to {target_uname}: {text}")
+            return True
+        except (socket.timeout,OSError) as e:
+            logger.error(f"Failed to send message to {target_uname} at {target_ip}: {e}")
+            return False
+        finally:
+            peer_sock.close()
+
+    def _handle_chat_message(self, peer_ip: str, text: str) -> None:
+        """ Processes inbound p2p chat messages. """
+        sender = self.core.request_peer_uname(peer_ip) or peer_ip
+        logger.info(f"Received message from {sender}: {text}")
+
+        # Append to chat history
+        self.add_message_to_history(sender, text, is_self=False)
+
+        # Trigger notification (this could be a GUI update or a console print)
+        logger.info(f"New message from {sender}: {text}")
+
 
 
 
