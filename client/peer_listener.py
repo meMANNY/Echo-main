@@ -109,7 +109,8 @@ class PeerListener:
 
         self.core.add_message_to_history(sender, text, is_self=False)
 
-        # TODO: Trigger notification (Step 4.2.4)
+        #Notify the user (honors show_notifications; never raises)
+        self.core.notify(f"New message from {sender}", text)
 
     def _handle_file_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
 

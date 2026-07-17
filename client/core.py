@@ -28,6 +28,13 @@ from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
 from utils.types import Message, UserSettings, HeaderCode
 
+#Desktop notifications are optional: fall back to log-only if notify-py
+#isn't available (headless test runs, or a python without the venv).
+try:
+    from notifypy import Notify
+except ImportError:
+    Notify = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +411,32 @@ class ClientCore:
             return False
         finally:
             peer_sock.close()
+
+    def notify(self, title: str, body: str) -> None:
+        """ Thin notification wrapper (Step 4.2.4).
+
+        Honors settings["show_notifications"]. Fires a desktop notification
+        via notify-py when available, and always logs. Phase 5 replaces this
+        with a GUI route (signal/toast) — callers just use notify(title, body).
+        Never raises: a notification failure must not crash the caller
+        (typically a peer-listener worker thread). """
+
+        if not self.settings.get("show_notifications", True):
+            logger.debug(f"Notification suppressed (show_notifications off): {title}")
+            return
+
+        try:
+            if Notify is not None:
+                notification = Notify()
+                notification.application_name = "Echo"
+                notification.title = title
+                notification.message = body
+                #block=False: don't stall the calling thread on the OS call
+                notification.send(block=False)
+            logger.info(f"[NOTIFY] {title}: {body}")
+        except Exception as e:
+            #Notification failures are cosmetic — log and move on.
+            logger.error(f"Failed to send desktop notification: {e}")
 
     
 
