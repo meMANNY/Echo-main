@@ -20,7 +20,8 @@ from utils.constants import (
     USER_SETTINGS_PATH,
     HEARTBEAT_TIMER,
     ONLINE_TIMEOUT,
-    MESSAGE_MAX_LEN
+    MESSAGE_MAX_LEN,
+    CLIENT_RECV_PORT
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
