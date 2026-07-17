@@ -360,9 +360,9 @@ class ClientCore:
         """ Appends a message to the in-memory message history for a given peer. """
 
         sender = self.settings["uname"] if is_self else peer_uname
-        if peer_uname not in self.message_history:
-            self.message_history[peer_uname] = []
-        
+        #setdefault is atomic: both a sender thread and a peer-handler thread
+        #get the SAME list back, so concurrent first messages can't clobber
+        #each other (a separate check-then-set would race).
         self.message_history.setdefault(peer_uname, []).append({
             "sender": sender,
             "content": content

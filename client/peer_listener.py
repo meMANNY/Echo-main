@@ -1,18 +1,23 @@
 import logging
 import socket
 import threading
+from typing import TYPE_CHECKING
 
 from utils.constants import CLIENT_RECV_PORT,FMT
 from utils.exceptions import RequestException, ExceptionCodes
 from utils.protocol import receive_message, send_error
 from utils.types import HeaderCode
-from client.core import ClientCore
+
+#Import only for type hints: a runtime import would create a circular
+#dependency once ClientCore starts instantiating PeerListener.
+if TYPE_CHECKING:
+    from client.core import ClientCore
 
 
 logger = logging.getLogger(__name__)
 
 class PeerListener:
-    def __init__(self, core: ClientCore) -> None:
+    def __init__(self, core: "ClientCore") -> None:
         self.core = core
         self.listen_socket = None
         self.running = False
@@ -104,8 +109,7 @@ class PeerListener:
 
         self.core.add_message_to_history(sender, text, is_self=False)
 
-        # 1. TODO: Append to chat history (Step 4.2.3)
-        # 2. TODO: Trigger notification (Step 4.2.4)
+        # TODO: Trigger notification (Step 4.2.4)
 
     def _handle_file_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
 
