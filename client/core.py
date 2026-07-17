@@ -363,7 +363,7 @@ class ClientCore:
         if peer_uname not in self.message_history:
             self.message_history[peer_uname] = []
         
-        self.message_history[peer_uname].append({
+        self.message_history.setdefault(peer_uname, []).append({
             "sender": sender,
             "content": content
         })

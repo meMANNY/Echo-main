@@ -2,21 +2,21 @@ import logging
 import socket
 import threading
 
-from utils.constants import CLIENT_RECV_PORT,FMT,MESSAGE_MAX_LEN
+from utils.constants import CLIENT_RECV_PORT,FMT
 from utils.exceptions import RequestException, ExceptionCodes
-from utils.protocol import receive_message, send_error, send_text
-from utils.types import HeaderCode, Message
+from utils.protocol import receive_message, send_error
+from utils.types import HeaderCode
+from client.core import ClientCore
 
 
 logger = logging.getLogger(__name__)
 
 class PeerListener:
-    def __init__(self, core):
+    def __init__(self, core: ClientCore) -> None:
         self.core = core
         self.listen_socket = None
         self.running = False
         self.thread = None
-        self.message_history: dict[str,list[Message]] = {} #Intializes a in-memory message history dictionary to store messages per peer IP.
 
     def start(self) -> None:
         """ Start the peer listener in a separate thread in the background. """
