@@ -125,6 +125,11 @@ class PeerListener:
                 logger.debug(f"Error closing peer listener socket: {e}")
             self.listen_socket = None
             logger.info("Peer listener stopped.")
+    
+    def add_message_to_history(self,peer_uname: str,content: str,is_self: bool) -> None:
+        """ Appends a message to the in-memory message history for a given peer. """
+
+        
 
 
 
