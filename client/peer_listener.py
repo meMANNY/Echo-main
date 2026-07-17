@@ -102,6 +102,8 @@ class PeerListener:
         sender = self.core.request_peer_uname(peer_ip) or peer_ip
         logger.info(f"Received message from {sender}: {text}")
 
+        self.core.add_message_to_history(sender, text, is_self=False)
+
         # 1. TODO: Append to chat history (Step 4.2.3)
         # 2. TODO: Trigger notification (Step 4.2.4)
 
@@ -126,13 +128,4 @@ class PeerListener:
             self.listen_socket = None
             logger.info("Peer listener stopped.")
     
-    def _handle_chat_message(self, peer_ip: str, text: str) -> None:
-        """ Processes inbound p2p chat messages. """
-        sender = self.core.request_peer_uname(peer_ip) or peer_ip
-        logger.info(f"Received message from {sender}: {text}")
-
-        # Append to chat history
-        self.add_message_to_history(sender, text, is_self=False)
-
-        # Trigger notification (this could be a GUI update or a console print)
-        logger.info(f"New message from {sender}: {text}")
+    
