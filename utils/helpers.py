@@ -180,21 +180,6 @@ def item_search(dir: list[DirData] | None, items: list[ItemSearchResult], search
             item_search(item["children"],items,search_query,owner)
     
 
-def display_share_dict(share: list[DirData] | None, indents:int = 0):
-
-    """ Prints the director structure in terminal"""
-
-    if share is None:
-        return
-    
-    for item in share:
-        if item["type"] == "file":
-            print("  "*indents+item["name"])
-        else:
-            print("  "*indents+ item["name"]+"/")
-            display_share_dict(item["children"],indents+1)
-
-
 def import_file_to_share(file_path: Path, share_folder_path: Path) -> Path | None:
 
     """ To generate Symlink to a given file in the user share folder path"""
@@ -212,21 +197,31 @@ def import_file_to_share(file_path: Path, share_folder_path: Path) -> Path | Non
         logging.error(f"Error importing file{str(file_path)}: {str(e)}")
         return None
 
-def print_share_tree(items: list[DirData], indent: int = 0) -> None:
-    """ Recursively print the directory structure of the share in a tree format. """
+def print_share_tree(items: list[DirData] | None, indent: int = 0) -> None:
+    """ Recursively print the directory structure of a browsed share.
+
+    None and [] are deliberately distinct (mirroring browse()):
+    None  -> the browse failed (unknown user / transport error),
+    []    -> a registered user with nothing shared.
+    Plain ASCII output only, so redirecting to a file (cp1252) can't
+    raise UnicodeEncodeError. """
+
+    if items is None:
+        print("(no data: browse failed or user not found)")
+        return
 
     if not items:
-        print(" " * indent + "No items in share.")
+        print("  " * indent + "No items in share.")
         return
-    
+
     for item in items:
         if item["type"] == "file":
             size_str = convert_size(item["size"]) if item.get("size") is not None else "0B"
             hash_str = item.get("hash") or "unverified"
-            print(" " * indent + f"{item['name']} (File, Size: {size_str}, Hash: {hash_str})")
+            print("  " * indent + f"{item['name']} (File, Size: {size_str}, Hash: {hash_str})")
 
         elif item["type"] == "directory":
-            print("  " * indent + f"📁 {item['name']}/")
+            print("  " * indent + f"{item['name']}/")
             children = item.get("children", [])
             if children:
                 print_share_tree(children, indent + 1)
