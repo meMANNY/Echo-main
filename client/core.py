@@ -28,6 +28,8 @@ from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
 from utils.types import DirData, Message, UserSettings, HeaderCode
 
+
+
 #Desktop notifications are optional: fall back to log-only if notify-py
 #isn't available (headless test runs, or a python without the venv).
 try:
@@ -482,6 +484,8 @@ class ClientCore:
                 logger.error(f"Browse failed due to socket error: {e}", exc_info=True)
                 self._teardown_server_socket()
                 return None
+    
+
                 
     
 

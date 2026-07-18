@@ -212,6 +212,25 @@ def import_file_to_share(file_path: Path, share_folder_path: Path) -> Path | Non
         logging.error(f"Error importing file{str(file_path)}: {str(e)}")
         return None
 
+def print_share_tree(items: list[DirData], indent: int = 0) -> None:
+    """ Recursively print the directory structure of the share in a tree format. """
+
+    if not items:
+        print(" " * indent + "No items in share.")
+        return
+    
+    for item in items:
+        if item["type"] == "file":
+            size_str = convert_size(item["size"]) if item.get("size") is not None else "0B"
+            hash_str = item.get("hash") or "unverified"
+            print(" " * indent + f"{item['name']} (File, Size: {size_str}, Hash: {hash_str})")
+
+        elif item["type"] == "directory":
+            print("  " * indent + f"📁 {item['name']}/")
+            children = item.get("children", [])
+            if children:
+                print_share_tree(children, indent + 1)
+
 
     
 
