@@ -3,6 +3,7 @@ import logging
 import socket
 import threading
 import time
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -26,7 +27,7 @@ from utils.constants import (
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
-from utils.types import DirData, Message, UserSettings, HeaderCode
+from utils.types import DirData, Message, UserSettings, HeaderCode, ItemSearchResult
 
 
 
@@ -485,7 +486,48 @@ class ClientCore:
                 self._teardown_server_socket()
                 return None
     
+    def search(self,query: str) -> Optional[list[ItemSearchResult]]:
 
+        """ Searches the shares of all online peers for items matching the query string."""
+
+        if not self.connected or not self.server_socket:
+            logger.error("Cannot search: client is not registered with the server.")
+            return None
+
+        clean_query = query.strip().lower()
+        if not clean_query:
+            logger.warning("Search query is empty after stripping whitespace.")
+            return []
+        
+        #Escape client side regex errors.
+        #Can cause client side error , to be handled gracefully.
+        safe_query = re.escape(clean_query) 
+
+        with self.server_lock:
+            try:
+                send_text(self.server_socket,HeaderCode.FILE_SEARCH,safe_query)
+                reply = receive_message(self.server_socket)
+
+                if reply["type"] == HeaderCode.FILE_SEARCH:
+
+                    results = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded list of ItemSearchResult
+                    logger.info(f"Received search results for query '{query}'. Total items found: {len(results)}")
+                    return results
+                else:
+                    logger.error(f"Unexpected response from server during search: {reply}")
+                    return None
+            except RequestException as e:
+                if e.code in (
+                    ExceptionCodes.DISCONNECT,
+                    ExceptionCodes.INVALID_HEADER,
+                    ExceptionCodes.INCOMPLETE,
+                ):
+                    logger.error(f"Connection to server lost during search ({e.code.name}): {e.msg}. Tearing down socket.")
+                    self._teardown_server_socket()
+                else:
+                    logger.error(f"Search failed with error code {e.code}: {e}")
+                    self._teardown_server_socket()
+                return None
                 
     
 
