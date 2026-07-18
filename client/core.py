@@ -526,7 +526,11 @@ class ClientCore:
                     self._teardown_server_socket()
                 else:
                     logger.error(f"Search failed with error code {e.code}: {e}")
-                    self._teardown_server_socket()
+                    
+                return None
+            except OSError as e:
+                logger.error(f"Search failed due to socket error: {e}", exc_info=True)
+                self._teardown_server_socket()
                 return None
                 
     
