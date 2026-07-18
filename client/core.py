@@ -440,7 +440,7 @@ class ClientCore:
     
     def browse(self,target_uname: str) -> Optional[list[DirData]]:
 
-        """ Fetched the shared file directory tree for a target user.
+        """ Fetches the shared file directory tree for a target user.
         Returns a list of DirData objects representing the directory tree, or None on failure. """
 
         if not self.connected or not self.server_socket:
@@ -479,7 +479,8 @@ class ClientCore:
                     logger.error(f"Browse failed with error code {e.code}: {e}")
                 return None
             except OSError as e:
-                logger.error(f"Browse failed due to socket error: {e}")
+                logger.error(f"Browse failed due to socket error: {e}", exc_info=True)
+                self._teardown_server_socket()
                 return None
                 
     
