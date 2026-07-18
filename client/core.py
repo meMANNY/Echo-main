@@ -26,7 +26,7 @@ from utils.constants import (
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
-from utils.types import Message, UserSettings, HeaderCode
+from utils.types import DirData, Message, UserSettings, HeaderCode
 
 #Desktop notifications are optional: fall back to log-only if notify-py
 #isn't available (headless test runs, or a python without the venv).
@@ -437,7 +437,51 @@ class ClientCore:
         except Exception as e:
             #Notification failures are cosmetic — log and move on.
             logger.error(f"Failed to send desktop notification: {e}")
+    
+    def browse(self,target_uname: str) -> Optional[list[DirData]]:
 
+        """ Fetched the shared file directory tree for a target user.
+        Returns a list of DirData objects representing the directory tree, or None on failure. """
+
+        if not self.connected or not self.server_socket:
+            logger.error("Cannot browse: client is not registered with the server.")
+            return None
+        
+        with self.server_lock:
+            try:
+
+                send_text(self.server_socket,HeaderCode.FILE_BROWSE,target_uname)
+
+                reply = receive_message(self.server_socket)
+                if reply["type"] == HeaderCode.FILE_BROWSE:
+
+                    #Unpack record
+                    doc = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded list of DirData
+                    share_tree = doc.get("share", [])
+                    logger.info(f"Received share data for {target_uname}. Total items: {len(share_tree)}")
+
+                    return share_tree
+                else:
+                    logger.error(f"Unexpected response from server during browse: {reply}")
+                    return None
+            
+            except RequestException as e:
+                if e.code == ExceptionCodes.NOT_FOUND:
+                    logger.warning(f"Browse failed: User '{target_uname}' not found on server.")
+                elif e.code in (
+                    ExceptionCodes.DISCONNECT,
+                    ExceptionCodes.INVALID_HEADER,
+                    ExceptionCodes.INCOMPLETE,
+                ):
+                    logger.error(f"Connection to server lost during browse ({e.code.name}): {e.msg}. Tearing down socket.")
+                    self._teardown_server_socket()
+                else:
+                    logger.error(f"Browse failed with error code {e.code}: {e}")
+                return None
+            except OSError as e:
+                logger.error(f"Browse failed due to socket error: {e}")
+                return None
+                
     
 
 
