@@ -225,6 +225,7 @@ def print_share_tree(items: list[DirData] | None, indent: int = 0) -> None:
             children = item.get("children", [])
             if children:
                 print_share_tree(children, indent + 1)
+    
 
 
     
