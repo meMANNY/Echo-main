@@ -1,0 +1,748 @@
+================================================================================
+              PHASE 5 — PyQt5 UI DEVELOPMENT: DETAILED PLAN
+================================================================================
+                         Generated: 2026-07-19
+================================================================================
+
+CONTEXT
+-------
+Phase 4 gave you a headless client engine: ClientCore (client/core.py)
+owns the persistent server socket behind server_lock, registration,
+settings, share publishing, the heartbeat thread, chat send + history,
+notifications, browse and search. PeerListener (client/peer_listener.py)
+owns the inbound accept loop and dispatch. Everything is Qt-free and
+testable from a terminal — which was the whole point.
+
+Phase 5 puts a face on that engine. By the end of it you should be able
+to hand someone the app: they double-click, pick a username, see who is
+online, browse and search shares, chat, and move files with progress
+bars — never knowing a terminal exists.
+
+Phase 5 mirrors sections 5.1-5.4 of PROGRESS_AND_TASKS.txt:
+  5.1 Window Architecture — entry point, window switching, the
+                            core<->UI adapter seam
+  5.2 Windows & Dialogs   — StartWindow, config, main window, settings,
+                            search, file info, progress widget, errors
+  5.3 UI Features         — live user list, file tree, chat pane,
+                            progress area, context actions
+  5.4 Qt Threading        — workers, signals/slots, thread affinity
+
+PREREQUISITE — BE HONEST ABOUT WHERE PHASE 4 STANDS
+----------------------------------------------------
+As of this writing, Phase 4 sections 4.1-4.4 are implemented and
+reviewed; 4.5-4.7 (downloads, pause/resume, direct transfer) are NOT
+yet built. That does not block starting Phase 5 — but it shapes the
+order:
+
+  - Sessions 1-7 below (shell, adapter, user list, browse, chat,
+    search) depend only on 4.1-4.4. Start any time.
+  - Sessions 8-9 (progress widgets, pause/resume, consent dialog)
+    bind directly to 4.5/4.6/4.7 structures (TransferProgress, the
+    progress journal, DIRECT_TRANSFER_REQUEST). Finish those in the
+    headless client FIRST, verify them from the REPL driver, and only
+    then build their UI. Building UI against transfer code that has
+    never run headless means debugging two unknowns at once.
+
+CRITICAL ARCHITECTURAL FACT — THE GUI THREAD RULE
+--------------------------------------------------
+This is the Phase 5 equivalent of Phase 4's "two roles in one process"
+fact. Internalize it before writing a line of UI:
+
+  ONLY the thread that created a widget may touch it. In Qt that is
+  the MAIN thread (the one running QApplication.exec_()). Your
+  heartbeat thread, peer-listener workers, and download workers must
+  NEVER call a widget method, set a label, or append to a text box.
+  Doing so doesn't always crash immediately — it corrupts state and
+  crashes LATER, somewhere unrelated, which is far worse.
+
+The sanctioned crossing is the SIGNAL/SLOT mechanism: a background
+thread emits a signal (thread-safe), Qt queues it, and the connected
+slot runs on the GUI thread where touching widgets is legal. Every
+piece of data that originates on a background thread (a heartbeat
+update, an inbound chat, a progress tick) crosses into the UI through
+exactly one doorway: a pyqtSignal.
+
+Echo has an advantage here that Drizzle threw away. Drizzle fused
+transport and UI into one 2415-line file (DrizzleMainWindow.py) glued
+together by ~10 module globals. Your ClientCore is already Qt-free.
+Phase 5's central design job is ONE new class — a thin adapter that
+owns the core, exposes signals, and forwards core events into them.
+Keep that seam clean and the rest of Phase 5 is layout work.
+
+WHY THIS PHASE MATTERS
+----------------------
+1. It is the phase people can SEE. For a resume project, the headless
+   engine is the substance but the UI is the demo. A clean two-machine
+   demo (chat + file transfer with progress bars) is what makes the
+   project legible to a non-networking audience in 30 seconds.
+
+2. It teaches EVENT-DRIVEN programming for real. Phase 4 was
+   request/response; Phase 5 is "everything happens at once and the
+   user can click anything at any time." Thread affinity, queued
+   connections, and the event loop are the same concepts you'd need
+   in any GUI or game-loop codebase.
+
+3. It is the acid test of your Phase 4 boundary. If you can build the
+   whole UI WITHOUT editing core.py (beyond adding callback hooks),
+   the transport/presentation separation was real. Every time you feel
+   tempted to import PyQt5 inside core.py, the boundary is leaking —
+   stop and route it through the adapter instead.
+
+
+================================================================================
+PHASE 5.1 — WINDOW ARCHITECTURE
+================================================================================
+
+GOAL: An app.py entry point that decides first-run vs. returning user,
+a MainWindow shell that can swap its inner UI, and the CoreAdapter that
+connects ClientCore to Qt — the one genuinely architectural piece of
+Phase 5.
+
+
+--------------------------------------------------------------------------------
+STEP 5.1.1 — The entry point (client/app.py)
+--------------------------------------------------------------------------------
+
+Drizzle's shape (Drizzle/src/client/app.py) is right; steal it, minus
+its mistakes:
+
+  1. QApplication(sys.argv)
+  2. Construct ClientCore(). Its __init__ already makes the app dirs
+     and loads settings — do NOT duplicate Drizzle's module-level
+     mkdir block (app.py:16-23); your core owns that now.
+  3. Decide the flow:
+       core.first_run == True  -> show StartWindow (username + server
+                                  IP + folders)
+       core.first_run == False -> go straight to the main window and
+                                  auto-connect with saved settings.
+     Drizzle decides this by try/except on reading settings
+     (app.py:58-75); you computed an explicit first_run flag in
+     _load_settings() precisely so the UI could make this decision
+     cleanly. Use it.
+  4. MainWindow(QMainWindow) is a thin shell: it owns whichever Ui_*
+     object is active, centers itself (Drizzle app.py:77-80), and
+     overrides closeEvent to (a) save the progress journal (4.6.4) and
+     (b) stop the PeerListener + close sockets. Drizzle only dumps
+     progress on close (app.py:46-51); you can shut down cleaner.
+
+Note on the prototype UI files: client/ui/ClientWindow.py (598 lines),
+client/ui/EchoMainWindow.py (423), client/ui/MainWindow.py (585) and
+public/initialui.py (65) are early Designer-generated prototypes with
+raw-string protocol code baked into button handlers. Same discipline as
+Phase 4's client.py/p2p.py: keep as visual reference, import NOTHING
+from them, delete once Phase 5 is verified.
+
+
+--------------------------------------------------------------------------------
+STEP 5.1.2 — The CoreAdapter (the design centerpiece)
+--------------------------------------------------------------------------------
+
+One new class, client/adapter.py (or inside app.py to start):
+
+  class CoreAdapter(QObject):
+      peers_changed      = pyqtSignal(dict)   # uname -> last_seen
+      message_received   = pyqtSignal(dict)   # Message TypedDict
+      notification       = pyqtSignal(str, str)             # title, body
+      transfer_progress  = pyqtSignal(object)               # 4.6 struct
+      transfer_request   = pyqtSignal(object, object)       # 4.7 consent
+      connection_lost    = pyqtSignal(str)                  # reason
+
+It OWNS a ClientCore and a PeerListener, and does three jobs:
+
+  (a) FORWARD EVENTS OUT. Give ClientCore plain-Python callback hooks
+      (self.on_peers_changed, self.on_message, ...) that default to
+      None. Core calls them (guarded: `if self.on_message: ...`) at
+      the exact points where it currently only logs — end of
+      _update_online_peers, inside add_message_to_history (receive
+      path), inside notify(). The adapter sets each hook to a
+      function that emits the matching signal. Emitting a signal from
+      a non-GUI thread is SAFE — that is the entire point; Qt sees the
+      receiver lives on the GUI thread and queues the call.
+      Core stays importable without Qt; headless tests still run.
+
+  (b) RUN BLOCKING CALLS OFF THE GUI THREAD. connect_to_server(),
+      register(), browse(), search(), publish_share_data() all block
+      on a network round-trip. Called directly from a button handler
+      they freeze the window for up to the socket timeout. Drizzle
+      makes exactly this mistake: it connects AND registers on the GUI
+      thread inside the window constructor (DrizzleMainWindow.py:
+      1278-1304) — with a slow server the app white-screens on
+      launch. Give the adapter a small "run in worker, deliver result
+      via signal" helper (QThreadPool + QRunnable is enough) and route
+      every user-initiated core call through it.
+
+  (c) BE THE ONLY QT<->CORE TOUCHPOINT. Widgets talk to the adapter;
+      the adapter talks to the core. If a widget ever imports
+      client.core directly, you are rebuilding Drizzle.
+
+Decision (mirrors Phase 4 Q1): adapter by COMPOSITION, not making
+ClientCore inherit QObject. Inheriting would drag Qt into every
+headless test and tie core's lifetime to Qt's. Composition keeps the
+dependency arrow pointing one way: adapter -> core, never core -> Qt.
+
+
+--------------------------------------------------------------------------------
+STEP 5.1.3 — Window switching
+--------------------------------------------------------------------------------
+
+First-run flow: StartWindow (username) -> BasicConfigWindow (server IP,
+share folder, downloads folder) -> main window. Drizzle chains these by
+having each window construct the next and close itself
+(StartWindow.py:93-97 onContinue). It works; keep it, but pass the
+CoreAdapter along the chain instead of mutating MainWindow.user_settings
+directly — the adapter's save path goes through core.save_settings() so
+settings hit disk exactly once, in one place.
+
+Returning-user flow: skip both, construct the main window, and kick off
+connect+register through the adapter worker IMMEDIATELY, showing a
+"connecting..." state in the UI (see 5.3.6). Never block the first
+paint on the network.
+
+
+================================================================================
+PHASE 5.2 — WINDOWS AND DIALOGS
+================================================================================
+
+GOAL: All eight surfaces, smallest-first. Each maps to a Drizzle file
+you can crib layout from — line counts tell you the effort.
+
+--------------------------------------------------------------------------------
+STEP 5.2.1 — StartWindow (Drizzle: StartWindow.py, 97 lines)
+--------------------------------------------------------------------------------
+A label, a QLineEdit for username, a Continue button. onContinue
+stores the username and advances (StartWindow.py:93-97). Add what
+Drizzle lacks: reject empty/whitespace usernames client-side before
+advancing (your server would reject them anyway; fail fast and polite).
+
+--------------------------------------------------------------------------------
+STEP 5.2.2 — BasicConfigWindow (Drizzle: BasicConfigWindow.py, 140)
+--------------------------------------------------------------------------------
+Server IP field + two folder pickers (QFileDialog.getExistingDirectory)
+for share and downloads folders, defaults prefilled from constants.
+On Continue: write settings via the adapter, then attempt
+connect+register IN A WORKER. Three outcomes surface right here:
+  - success            -> open main window
+  - USER_EXISTS        -> message box, stay here, let them rename
+  - connect failed     -> ErrorDialog with "check server IP", stay.
+This is your register() contract from 4.1.3 rendered as UI.
+
+--------------------------------------------------------------------------------
+STEP 5.2.3 — EchoMainWindow (Drizzle: Ui_DrizzleMainWindow, ~1250
+             lines of the 2415 — but half of that is transport you
+             already have)
+--------------------------------------------------------------------------------
+The one big layout. Three vertical panes (Drizzle setupUi:1698-1963):
+
+  LEFT   — user list (QListWidget lw_OnlineStatus) with online icons,
+           plus your own uname/status header.
+  CENTER — chat: message area (QTextEdit, read-only, HTML) + input
+           line + Send button; disabled until an online user is
+           selected.
+  RIGHT  — files: share tree (QTreeWidget) for the selected user,
+           Refresh / Download / File Info buttons, a global Search
+           button, Import File/Folder + Share buttons for your own
+           share, and the download-progress area (a QVBoxLayout you
+           append FileProgressWidgets into).
+
+Build it as STATIC layout first (Session 3) with every action stubbed
+to a log line. Wire behavior pane by pane in later sessions. Do not
+try to make one giant setupUi work in a single sitting — Drizzle's is
+265 lines of generated soup; hand-write yours in composable chunks.
+
+--------------------------------------------------------------------------------
+STEP 5.2.4 — SettingsDialog (Drizzle: SettingsDialog.py, 230)
+--------------------------------------------------------------------------------
+Edits UserSettings fields; Save routes through adapter ->
+core.save_settings. If share_folder_path changed, call
+publish_share_data() (worker!) so the server index follows the
+setting. Drizzle forgets this until restart.
+
+--------------------------------------------------------------------------------
+STEP 5.2.5 — FileSearchDialog (Drizzle: FileSearchDialog.py, 262)
+--------------------------------------------------------------------------------
+A query box + results table (owner, name, size) + Download button.
+Calls adapter.search() (worker), renders list[ItemSearchResult].
+Empty list -> "No results" label, NOT an error (your 4.4.1 semantics).
+"Go to owner" selects that user in the main window's list and triggers
+browse — this is 4.4.2 finally becoming a feature. Drizzle's
+download-from-search path is download_from_global_search (2391).
+
+--------------------------------------------------------------------------------
+STEP 5.2.6 — FileInfoDialog (Drizzle: FileInfoDialog.py, 186)
+--------------------------------------------------------------------------------
+Read-only detail view of one DirData: name, path, type, size via
+convert_size, hash or "unverified" (your print_share_tree rules, in
+dialog form). Enabled only when exactly one item is selected
+(on_file_item_selected, 1445-1466).
+
+--------------------------------------------------------------------------------
+STEP 5.2.7 — FileProgressWidget (Drizzle: FileProgressWidget.py, 149)
+--------------------------------------------------------------------------------
+The reusable per-download row: filename label, QProgressBar, pause/
+resume toggle button. Three Drizzle details worth copying exactly:
+  - progressBar.setMaximum(10000) and setValue(int(10000*cur/total))
+    (lines 77, 122): progress in basis points, so files of any size
+    get smooth bar motion despite int-only QProgressBar.
+  - setFormat(f"{convert_size(cur)}/{convert_size(total)}") — human
+    numbers on the bar itself.
+  - The widget takes pause_signal/resume_signal in its constructor
+    (52-53) and emits them with its own path as payload (83-87) —
+    the widget doesn't know HOW pausing works, it just emits. Your
+    4.6.2 threading.Event machinery subscribes on the other side.
+allow_pause=False variant covers receiving direct transfers (you can't
+pause a push you didn't initiate).
+
+--------------------------------------------------------------------------------
+STEP 5.2.8 — ErrorDialog (Drizzle: ErrorDialog.py, 114)
+--------------------------------------------------------------------------------
+Message + Close, optionally an "Open Settings" button when the error
+is settings-fixable (wrong server IP). Cheap to build; build it FIRST
+among the dialogs so every later session has a real error surface
+instead of print(). One improvement over Drizzle: their fatal path
+calls sys.exit(show_error_dialog(...)) from the window constructor
+(1331-1339) — app dies before the event loop starts. Yours should let
+the user fix-and-retry wherever possible (see Improvement E).
+
+
+================================================================================
+PHASE 5.3 — UI FEATURES (WIRING THE PANES)
+================================================================================
+
+GOAL: Each static pane comes alive, one adapter signal at a time.
+
+--------------------------------------------------------------------------------
+STEP 5.3.1 — Live user list
+--------------------------------------------------------------------------------
+peers_changed(dict) -> slot update_online_status. Drizzle's version
+(1582-1637) is worth reading closely because it does the RIGHT thing:
+it DIFFS the incoming status dict against the rendered list — updates
+icons/text in place, appends only genuinely new users — instead of
+clear()+rebuild every 5 seconds. Rebuild would drop the user's current
+selection and flicker. Copy the diff approach; skip Drizzle's habit of
+keeping it all in module globals.
+Offline users stay listed, greyed with "last active: <timestamp>"
+(1608-1610) — your online_peers dict only holds ONLINE peers, so the
+UI keeps its own uname -> last_seen memory of everyone it has seen
+this session. That memory belongs in the widget layer, not in core.
+
+--------------------------------------------------------------------------------
+STEP 5.3.2 — Selection drives capability
+--------------------------------------------------------------------------------
+on_user_selection_changed (Drizzle 1639-1661): selecting a user
+renders their chat history and enables/disables Send Message, Send
+File, Refresh based on whether they're currently online. This is the
+UI version of "make illegal states unrepresentable" — a disabled
+button beats an error dialog after a doomed request. Selecting a user
+also triggers adapter.browse(uname) (worker) to fill the tree.
+
+--------------------------------------------------------------------------------
+STEP 5.3.3 — The share tree
+--------------------------------------------------------------------------------
+render_file_tree (Drizzle 1418-1443): recursive walk of
+list[DirData] creating QTreeWidgetItems, and — the key trick —
+item.setData(0, Qt.UserRole, item_dict) stashes the ORIGINAL DirData
+on each row. Selection handlers read it back with item.data(0,
+Qt.UserRole) (1457) — no parallel lookup table, no re-walk. The tree
+IS the model. Directories get a trailing "/" like your
+print_share_tree. browse() returning [] renders an empty tree plus a
+"nothing shared" placeholder row; None (failure) shows the error
+surface — preserve your 4.3 None-vs-[] distinction in pixels.
+
+--------------------------------------------------------------------------------
+STEP 5.3.4 — Chat pane
+--------------------------------------------------------------------------------
+Inbound: adapter.message_received -> messages_controller (Drizzle
+1540): if the sender is the currently selected user, append to the
+message area; either way it's already in core.message_history (your
+4.2.3 did this), so switching users re-renders from history
+(render_messages, 1558). Outbound: Send button/Enter -> adapter ->
+core.send_chat_message (worker — it does two network round-trips), on
+False show the error surface.
+Rendering: QTextEdit with insertHtml using helpers.
+construct_message_html + LEADING_HTML/TRAILING_HTML from constants —
+they exist for exactly this. MESSAGE_MAX_LEN over-length input:
+disable Send + show a char counter, don't error after the fact.
+
+--------------------------------------------------------------------------------
+STEP 5.3.5 — Downloads pane (depends on 4.5/4.6 being done headless)
+--------------------------------------------------------------------------------
+Download button -> for each selected DirData: file -> one worker;
+directory -> flatten via get_files_in_dir, one worker per file plus an
+aggregate DirProgress row (Drizzle download_files, 1468-1538). Worker
+signals: receiving_new_file -> create a FileProgressWidget
+(new_file_progress, 2233), file_progress_update -> update bar (2251),
+file_download_complete -> remove row + notify (2208). Pause/resume
+buttons emit path-carrying signals routed to your 4.6.2 Event logic
+(pause_download 2110, resume_download 2135). On startup, load the 4.6.4
+journal and pre-create PAUSED progress rows so interrupted downloads
+are visibly resumable (Drizzle does this with pickles, 1343-1356 —
+keep your JSON journal, see Improvement C).
+
+--------------------------------------------------------------------------------
+STEP 5.3.6 — Connection state surface
+--------------------------------------------------------------------------------
+Something Drizzle lacks entirely: a visible connected/connecting/
+disconnected indicator. Your core already tears down the socket and
+flips self.connected on failure; forward that moment through
+adapter.connection_lost and render it (status bar text + disable the
+server-dependent buttons + a Reconnect button that re-runs
+connect+register in a worker). Without this, a dead server just looks
+like "everyone went offline," which you know from Phase 4 debugging is
+maddening.
+
+--------------------------------------------------------------------------------
+STEP 5.3.7 — Notifications through the GUI
+--------------------------------------------------------------------------------
+Your 4.2.4 notify() was built to be replaced: the adapter now routes
+core's notification hook to a signal; the slot fires notify-py only
+when the window is minimized/unfocused (QApplication.applicationState)
+and otherwise relies on in-window cues. Honor show_notifications from
+settings, as now.
+
+
+================================================================================
+PHASE 5.4 — QT THREADING
+================================================================================
+
+GOAL: Every blocking or long-running operation off the GUI thread, with
+exactly one crossing mechanism (signals). You already built the hard
+concurrency in Phase 4; this section is about not un-building it.
+
+--------------------------------------------------------------------------------
+STEP 5.4.1 — Decide the thread map (write it down)
+--------------------------------------------------------------------------------
+  GUI thread          — widgets, and nothing else.
+  core heartbeat      — your existing plain daemon thread. KEEPS
+                        running as-is; its callback -> adapter signal.
+  PeerListener        — your existing accept loop + per-connection
+                        workers. KEEP. Callbacks -> adapter signals.
+  QThreadPool         — short-lived workers for user-initiated
+                        blocking calls (connect/register/browse/
+                        search/publish) and per-file transfers.
+
+This intentionally REFINES the Phase 4 plan's "Phase 5 re-homes plain
+threads into QThreads": with the adapter pattern there is no need to
+re-home core's internal threads at all — a pyqtSignal emitted from a
+plain threading.Thread is delivered queued to the GUI thread exactly
+like one emitted from a QThread. Re-homing would churn working code
+for zero behavioral gain. What DOES need Qt machinery is anything the
+UI initiates and waits on — that's what the pool is for. (See Q3.)
+
+--------------------------------------------------------------------------------
+STEP 5.4.2 — The three Qt worker patterns (know all, use two)
+--------------------------------------------------------------------------------
+Drizzle demonstrates all three; learn to recognize them:
+  1. QObject worker + moveToThread — HeartbeatWorker (281-327) is
+     created, moved to a QThread, and started via
+     thread.started.connect(worker.run) (1309-1315). Right for
+     LONG-LIVED loops that emit repeatedly. You won't need it (your
+     loops live in core), but this is THE canonical Qt pattern —
+     understand why the worker must be constructed BEFORE moveToThread
+     and why its slots then run on the new thread.
+  2. QRunnable + QThreadPool — RequestFileWorker (925). Right for
+     SHORT-LIVED, pooled jobs: downloads, one-shot server calls.
+     This is your workhorse.
+  3. Subclassing QThread and overriding run() — the pattern most
+     tutorials teach and the least composable. Skip it.
+
+--------------------------------------------------------------------------------
+STEP 5.4.3 — The QRunnable-has-no-signals trap
+--------------------------------------------------------------------------------
+QRunnable does not inherit QObject, so it CANNOT declare pyqtSignals.
+Drizzle's fix is the little Signals(QObject) bundle (895-922): each
+runnable carries `self.signals = Signals()` and emits through it
+(download_files connects them per-worker at 1508-1510). Copy this
+pattern verbatim for your download workers — trying to put signals
+directly on a runnable is a classic hour-loser.
+
+--------------------------------------------------------------------------------
+STEP 5.4.4 — Locks across the boundary
+--------------------------------------------------------------------------------
+Drizzle guards its server socket with a QMutex (server_socket_mutex,
+e.g. 1487-1495 in download_files). You already guard yours with
+threading.Lock INSIDE core methods — which is better: callers can't
+forget it. Rules for Phase 5:
+  - Do NOT add QMutex around adapter calls into core; core locks
+    itself. Double-locking the same logical resource from two
+    layers is how UI deadlocks are born.
+  - The GUI thread must never WAIT on server_lock for long: it never
+    calls core's locked methods directly (workers do). That rule is
+    what keeps a slow server from freezing paint.
+  - Shared dicts written by workers and read by slots (e.g. progress
+    structs) are fine when writes stay in the worker and the UI only
+    reads snapshots delivered via signal payloads. Prefer passing the
+    DATA in the signal over sharing the structure.
+
+--------------------------------------------------------------------------------
+STEP 5.4.5 — Shutdown ordering
+--------------------------------------------------------------------------------
+closeEvent: dump the progress journal, stop() the PeerListener, close
+the server socket, THEN accept the close. Your Phase 4 daemon threads
+die with the process — but flush anything they might be mid-writing
+first (the journal write must not race a dying transfer worker; pause
+active transfers before dumping, like Drizzle's dump_progress_data
+flow, 1358-1362 + app.py:46-51).
+
+
+================================================================================
+IMPORTANT CONCEPTS TO LEARN IN THIS PHASE
+================================================================================
+
+  1. THREAD AFFINITY & THE GUI THREAD RULE
+     Every QObject "lives on" one thread; widgets live on the main
+     thread and may only be touched there. This is not a Qt quirk —
+     Win32, Cocoa, GTK, Android all have the same rule. The portable
+     lesson: UI toolkits are single-threaded state machines; you
+     bring data TO them, never reach INTO them from workers.
+
+  2. SIGNALS/SLOTS AS THREAD-SAFE MESSAGE PASSING
+     A queued signal is a message dropped into the receiver thread's
+     event queue — the same idea as your wire protocol, in-process.
+     Understand the connection types: Direct (same-thread function
+     call) vs Queued (cross-thread, marshalled) vs Auto (Qt picks by
+     comparing threads at emit time). Auto is why "emit from a plain
+     thread" just works.
+
+  3. THE EVENT LOOP
+     exec_() is a while-true dispatching events — paint, click, timer,
+     queued slot. Block it for 300ms and the app feels sticky; for 5s
+     and Windows greys the title bar. Every "app frozen" bug in Phase
+     5 is something synchronous sneaking onto this loop. Same model as
+     your server's select() loop: one dispatcher, many small handlers,
+     nothing slow inline.
+
+  4. WORKER PATTERNS & LIFETIMES
+     moveToThread for long-lived loops, QThreadPool/QRunnable for
+     short jobs — and the lifetime traps: a QThread garbage-collected
+     while running crashes; a worker parented to a widget dies with
+     it. Keep references (self.thread, self.worker) deliberately.
+
+  5. RETAINED-MODE UI & DIFF-BASED UPDATES
+     Widgets persist between updates (retained mode); you reconcile
+     new data against existing widgets rather than rebuilding
+     (update_online_status's set-difference diff). This is the exact
+     mental model behind React/Flutter reconciliation — learn it here
+     with 40 lines of Python and no framework magic.
+
+  6. DATA-CARRYING WIDGETS vs MODEL/VIEW
+     setData(Qt.UserRole, obj) glues your DirData to tree rows —
+     simple, fine at LAN scale. Know what it trades away: QTreeView +
+     QAbstractItemModel separates data from view for 100k-row
+     scalability and testability. Use QTreeWidget now; be able to say
+     WHY, and what you'd switch to.
+
+  7. UI STATE MACHINES (CAPABILITY GATING)
+     Enabled/disabled buttons, connecting/connected/disconnected
+     banners — the UI mirror of "make illegal states unrepresentable".
+     Design states first, then widgets: every button should be
+     impossible to click when its preconditions don't hold.
+
+  8. BACKPRESSURE IN THE UI
+     A 100MB/s transfer emitting a signal per 16KB chunk = ~6400
+     queued events/sec — the GUI drowns doing repaints. Throttle at
+     the SOURCE: emit progress every N chunks or when percent moved by
+     >= 0.1. Same throughput-vs-overhead trade-off as your chunk-size
+     decision in 4.5, resurfacing one layer up.
+
+  9. GRACEFUL DEGRADATION, UI EDITION
+     Server death mid-session must produce a calm banner + disabled
+     controls + a retry path — not a dialog storm from the heartbeat
+     failing every 5 seconds. Coalesce repeated failures into ONE
+     state change (that's what connection_lost as a signal gives you).
+
+
+================================================================================
+IMPROVEMENTS YOU CAN ADD BEYOND DRIZZLE
+================================================================================
+
+  A. THE ADAPTER SEAM (Qt-FREE CORE)
+     Drizzle: transport welded into the window class, ~10 module
+     globals, untestable without X11. Echo: ClientCore untouched, one
+     CoreAdapter, headless tests keep passing. This is the single
+     biggest architectural win and it is nearly free — you already
+     built the hard half in Phase 4.
+
+  B. NO GUI-THREAD NETWORKING, EVER
+     Drizzle connects+registers on the GUI thread in the constructor
+     (1278-1304) and freezes on a slow server. Route every core call
+     through the worker helper from day one. Cheap discipline,
+     dramatic perceived-quality difference.
+
+  C. JSON PROGRESS JOURNAL, NOT PICKLES
+     Drizzle pickles transfer_progress/dir_progress/progress_widgets
+     (1255-1276, 1343-1356) — unreadable, version-fragile, and
+     unpickling arbitrary files is an attack surface. Your 4.6.4 JSON
+     journal already does this better; the UI just renders it.
+
+  D. A VISIBLE CONNECTION STATE (5.3.6)
+     Drizzle has none: server death = mystery offline-everyone. A
+     status banner + reconnect button turns your Phase 4 teardown
+     paths into a feature a reviewer can see.
+
+  E. NO sys.exit() ERROR HANDLING
+     Drizzle exits the process from inside the window constructor on
+     connect failure (1331-1339). Every Echo failure should land in a
+     dialog/banner with a retry, and the app survives.
+
+  F. PROGRESS SIGNAL THROTTLING (concept 8)
+     Drizzle emits per-chunk. Emit per-N-chunks; keep the UI fluid
+     during fast LAN transfers.
+
+  G. TRANSFER RATE / ETA IN THE PROGRESS ROW
+     Phase 4 Improvement G's bytes/sec, shown in the FileProgressWidget
+     label. Small, visible, satisfying in demos.
+
+Pick 2-3 beyond A/B/E which you should treat as non-negotiable: (D) is
+the highest demo value; (F) matters the moment you test on a real LAN.
+
+
+================================================================================
+DECISIONS TO MAKE BEFORE STARTING PHASE 5
+================================================================================
+
+  Q1. QT DESIGNER OR HAND-CODED LAYOUTS?
+      Recommended: hand-code. Drizzle's files are pyuic-style output
+      (setupUi/retranslateUi, objectName soup) — fine to CRIB layouts
+      from, miserable to maintain. Hand-coding nested QVBox/QHBox
+      layouts for these window sizes is genuinely less work, and you
+      learn the layout system. If EchoMainWindow's three-pane layout
+      fights you, Designer for that ONE window is a legitimate assist.
+
+  Q2. ADAPTER (COMPOSITION) OR ClientCore(QObject)?
+      Recommended: composition adapter (5.1.2). Core stays Qt-free and
+      headless-testable; the REPL driver keeps working forever, which
+      is also your fastest bug-repro tool once the GUI exists.
+
+  Q3. RE-HOME CORE'S THREADS INTO QTHREADS?
+      Recommended: NO (refines the Phase 4 plan's assumption). Keep
+      the heartbeat + listener as plain threads; signals emitted from
+      them are delivered queued regardless. Use QThreadPool only for
+      UI-initiated blocking calls and transfers. Less churn, same
+      safety — but write down WHY, because "when do I actually need a
+      QThread" is exactly the kind of question this project exists to
+      answer.
+
+  Q4. QTreeWidget OR QTreeView+MODEL?
+      Recommended: QTreeWidget with Qt.UserRole data (matches Drizzle,
+      right-sized for LAN shares). Note QTreeView as the scale answer.
+
+  Q5. CHAT RENDERING: QTextEdit+HTML OR PER-MESSAGE WIDGETS?
+      Recommended: QTextEdit + insertHtml. construct_message_html and
+      LEADING_HTML/TRAILING_HTML already exist for it. Per-message
+      widget lists look nicer but cost layout performance and time.
+
+  Q6. WHEN TO FIRE DESKTOP vs IN-APP NOTIFICATIONS?
+      Recommended: desktop (notify-py) only when the app is not the
+      active window; in-app cues otherwise. All behind the existing
+      notify()/signal seam, honoring show_notifications.
+
+  Q7. STYLING SCOPE?
+      Recommended: functional first; at most one QSS stylesheet pass
+      at the end (Session 9). Styling before wiring is procrastination
+      with screenshots.
+
+
+================================================================================
+HOW TO VERIFY PHASE 5 IS DONE
+================================================================================
+
+Run the Phase 3 server + TWO GUI clients (ideally two machines, same
+caveats as Phase 4 verification).
+
+  Test 1 — first-run flow: fresh ~/.Echo -> StartWindow -> config ->
+  main window connected and registered; settings.json created; second
+  launch skips straight to the main window and auto-connects.
+
+  Test 2 — presence: both users appear in each other's list as online
+  within HEARTBEAT_TIMER; kill one, the other's list greys the entry
+  with a last-active timestamp within ONLINE_TIMEOUT; selection
+  enables/disables Send/Refresh correctly.
+
+  Test 3 — browse + search UI: selecting a user renders their tree
+  (empty share -> placeholder, not error); File Info shows size via
+  convert_size and "unverified" hash; search dialog finds a file with
+  owner attribution, empty query -> no request, no-results -> calm
+  message; Go-to-owner selects and browses.
+
+  Test 4 — chat: bidirectional messages render with sender styling;
+  history survives switching users; over-length input is blocked at
+  the box; minimized window -> desktop notification (if enabled).
+
+  Test 5 — transfers (needs 4.5/4.6 done): download file + folder
+  with live progress bars and human-readable sizes; pause -> resume
+  -> hash verifies; kill the app mid-download -> relaunch shows the
+  PAUSED row from the journal -> resume completes. Direct transfer
+  pops the consent dialog; accept lands the file, reject shows a
+  clean message to the sender (4.7).
+
+  Test 6 — THE FREEZE TEST (the one that grades your threading):
+  during a large transfer, the window stays responsive (drag it,
+  scroll chat, click around). Stop the server mid-session: banner
+  flips to disconnected, no dialog storm, Reconnect works after the
+  server returns. At no point does the OS mark the app "not
+  responding".
+
+Phase 5 is done when all six pass on two machines, the REPL driver
+STILL works headless (proof the core stayed clean), and grep finds no
+PyQt5 import anywhere under client/core.py or client/peer_listener.py.
+
+
+================================================================================
+WHAT'S NOT IN PHASE 5 (resist scope creep)
+================================================================================
+
+  - Compression, TLS, auth, mDNS discovery — Phase 7 (same as before).
+  - Chat history persistence to disk — Phase 7 nicety.
+  - Auto-reconnect loops / server failover — a manual Reconnect button
+    is Phase 5; automatic retry policy is Phase 7.
+  - Drag-and-drop into the share, system tray icon, i18n, packaging/
+    installers (PyInstaller) — Phase 7 polish if at all.
+  - QTreeView/model refactor — noted in Q4, not built.
+  - Custom theming beyond one QSS pass (Q7).
+
+
+================================================================================
+RECOMMENDED ORDER OF WORK FOR PHASE 5
+================================================================================
+
+  Session 0: PREREQUISITE — finish 4.5-4.7 headless + REPL-verified
+             if not already done. Do not start Session 8 without it.
+
+  Session 1: app.py entry + MainWindow shell + ErrorDialog +
+             StartWindow/BasicConfigWindow first-run chain (reusing
+             core.first_run). App launches, registers, exits clean.
+
+  Session 2: CoreAdapter: callback hooks in core, signals, the
+             worker-run helper. Prove it with a throwaway label bound
+             to peers_changed. (5.1.2 — the architectural session.)
+
+  Session 3: EchoMainWindow static three-pane layout, all actions
+             stubbed. (5.2.3)
+
+  Session 4: Live user list + selection gating + connection banner.
+             (5.3.1, 5.3.2, 5.3.6)
+
+  Session 5: Share tree + File Info dialog + Refresh. (5.3.3, 5.2.6)
+
+  Session 6: Chat pane + notification routing. (5.3.4, 5.3.7)
+
+  Session 7: Search dialog + go-to-owner. (5.2.5)
+
+  Session 8: Downloads: progress widgets, pool workers, pause/resume,
+             journal restore on launch. (5.3.5, 5.2.7) [needs 4.5/4.6]
+
+  Session 9: Direct-transfer consent dialog (4.7 UI), SettingsDialog,
+             one QSS styling pass, two-machine run of all six
+             verification tests, delete the prototype ui files
+             (ClientWindow.py, EchoMainWindow.py, MainWindow.py,
+             initialui.py).
+
+That matches the 2-3 weeks the timeline budgets for "High" effort.
+Bottom-up again: nothing in Sessions 4+ works until the adapter
+(Session 2) is solid — it is this phase's equivalent of Phase 4's
+locked server socket.
+
+
+================================================================================
+                              END OF PLAN
+================================================================================
