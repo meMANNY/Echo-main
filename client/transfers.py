@@ -16,7 +16,7 @@ from utils.constants import (
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.helpers import get_file_hash, get_unique_filename
-from utils.protocol import receive_message, send_msgpack, send_text
+from utils.protocol import receive_message, send_msgpack, send_text,send_error
 from utils.types import FileRequest, HeaderCode
 
 logger = logging.getLogger(__name__)
@@ -108,4 +108,59 @@ def download_file(
     finally:
         control_sock.close()
         data_listen_sock.close()
+
+def handle_incoming_file_request(core,conn: socket.socket, peer_ip: str, query: bytes) -> None:
+    """Handle incoming file request from a peer client.
+    Validates the path security, calculates the hash and streams file back to requester"""
+
+    try:
+        req: FileRequest = msgpack.unpackb(query, raw=False)
+        rel_path = req["filepath"]
+        target_port = req["port"]
+        request_hash = req.get("request_hash", False)
+        resume_offset = req.get("request_offset",0)
+
+        share_root = SHARE_FOLDER_PATH.resolve()
+        requested_file = (share_root / rel_path).resolve()
+
+        if not str(requested_file).startswith(str(share_root)) or not requested_file.is_file():
+            logger.warning(f"Rejected file request for {requested_file} from {peer_ip} for invalid path")
+            send_error(conn, RequestException(ExceptionCodes.NOT_FOUND, "Invalid file path"))
+            return
+        #Lazy hash calculation, only if the requester wants it
+        # If the requester set the request_hash option, the server does not have the hash of the file
+                # so send the updated hash to the server
+        if request_hash:
+            file_hash = get_file_hash(str(requested_file))
+            core.updated_file_hash_on_server(rel_path,file_hash)
+
+        data_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        data_sock.settimeout(5.0)
+
+        try:
+            logger.debug(f"Connecting to {peer_ip}:{target_port} for file transfer")
+            data_sock.connect((peer_ip, target_port))
+            data_sock.settimeout(None)  # Remove timeout after connection
+
+            file_size = requested_file.stat().st_size
+            with open(requested_file, "rb") as f:
+                if resume_offset > 0:
+                    f.seek(resume_offset)
+                while True:
+                    chunk = f.read(FILE_BUFFER_LEN)
+                    if not chunk:
+                        break
+                    data_sock.sendall(chunk)
+                logger.info(f"Successfully sent file {requested_file} to {peer_ip}:{target_port}")
+        finally:
+            data_sock.close()
+
+    except Exception as e:
+        logger.error(f"Error handling file request from {peer_ip}: {e}")
+    
+
+
+
+
+
 
