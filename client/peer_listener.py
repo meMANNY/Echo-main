@@ -114,8 +114,10 @@ class PeerListener:
 
     def _handle_file_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
 
-        #Placeholder for session 5 file uploads
-        pass
+        """Dispatches incoming file requests to transfer handle"""
+        from client.transfers import handle_incoming_file_request
+        handle_incoming_file_request(self.core,conn,peer_ip,query)
+        
 
     def _handle_direct_transfer_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
 
