@@ -15,9 +15,9 @@ from utils.constants import (
     TEMP_FOLDER_PATH,
 )
 from utils.exceptions import ExceptionCodes, RequestException
-from utils.helpers import get_file_hash, get_unique_filename
+from utils.helpers import get_file_hash, get_files_in_dir, get_unique_filename
 from utils.protocol import receive_message, send_msgpack, send_text,send_error
-from utils.types import FileRequest, HeaderCode
+from utils.types import DirData, FileRequest, HeaderCode
 
 #Import only for type hints: a runtime import of client.core would create a
 #circular dependency once ClientCore instantiates PeerListener -> transfers.
@@ -168,9 +168,39 @@ def handle_incoming_file_request(core: "ClientCore", conn: socket.socket, peer_i
 
     except Exception as e:
         logger.error(f"Error handling file request from {peer_ip}: {e}")
-    
 
+def download_folder(
+        core: "ClientCore",
+        owner_name: str,
+        folder_dirdata: DirData
+                    ) -> bool:
 
+    """Recursively downloads a folder from a remote client via P2P connection.
+    Flattens the DirData structure into a list of files and downloads each file individually."""
+
+    files_to_download: list[DirData] = []
+
+    children = folder_dirdata.get("children", []) if folder_dirdata.get("type") == "directory" else [folder_dirdata]
+    get_files_in_dir(children, files_to_download)
+
+    if not files_to_download:
+        logger.info(f"No files to download in folder {folder_dirdata.get('name')}")
+        return True
+
+    logger.info(f"Starting download of folder {folder_dirdata.get('name')} with {len(files_to_download)} files from {owner_name}")
+
+    overall_success = True
+    for item in files_to_download:
+        remote_file_path = item["path"]
+        filesize = item["size"]
+        expected_hash = item.get("hash")
+
+        success = download_file(core=core, owner_name=owner_name, remote_file_path=remote_file_path, filesize=filesize, expected_hash=expected_hash)
+        if not success:
+            logger.error(f"Failed to download file {remote_file_path} from {owner_name}")
+            overall_success = False
+
+    return overall_success
 
 
 
