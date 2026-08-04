@@ -532,6 +532,26 @@ class ClientCore:
                 logger.error(f"Search failed due to socket error: {e}", exc_info=True)
                 self._teardown_server_socket()
                 return None
+
+    def updated_file_hash_on_server(self,filepath: str,file_hash: str) -> None:
+
+        """Pushes a newly calculated file hash to the server for a given relative file path. This is used when a peer requests a file hash that the server does not have cached."""
+        if not self.connected or not self.server_socket:
+            return False
+
+        payload = {
+            "filepath": filepath,
+            "hash": file_hash
+        }
+        with self.server_lock:
+            try: 
+                send_msgpack(self.server_socket,HeaderCode.UPDATE_HASH,payload)
+                reply = receive_message(self.server_socket)
+                return reply["type"] == HeaderCode.UPDATE_HASH
+            except(RequestException,OSError) as e:
+                logger.error(f"Failed to update file hash on server for '{filepath}': {e}", exc_info=True)
+                self._teardown_server_socket()
+                return False
                 
     
 
