@@ -10,7 +10,6 @@ from utils.constants import (
     CLIENT_RECV_PORT,
     FILE_BUFFER_LEN,
     FMT,
-    RECV_FOLDER_PATH,
     SHARE_FOLDER_PATH,
     TEMP_FOLDER_PATH,
 )
@@ -33,11 +32,18 @@ def download_file(
         remote_file_path: str,
         filesize: int,
         resume_offset: int = 0,
-        expected_hash: Optional[str] = None
+        expected_hash: Optional[str] = None,
+        dest_subpath: Optional[str] = None,
 )-> bool:
 
     """Downloads a file from a remote client via P2P connection.
-    Writes to a TEMP_FOLDER_PATH , verifies the hash, and then moves to the RECV_FOLDER_PATH if successful."""
+    Writes to a temp file, verifies the hash, and then moves it into the
+    downloads folder if successful.
+
+    dest_subpath: path relative to the downloads folder where the file should
+    land. Folder downloads pass the file's share-relative path so the source
+    tree is mirrored; a single-file download leaves it None and the file lands
+    flat under its own name."""
 
     owner_ip = core.request_peer_ip(owner_name)
     if not owner_ip:
@@ -56,13 +62,18 @@ def download_file(
         logger.error(f"Failed to bind data socket: {e}")
         return False
 
-    #TEMPORARY DOWNLOAD PATH
-    # Why temp-first: a download interrupted halfway must not leave a corrupt
-    # file masquerading as complete in the user's Downloads. The temp file IS
-    # your resume state
-    filename = Path(remote_file_path).name
-    temp_path = TEMP_FOLDER_PATH/f"{filename}.tmp"
-    mode = "ab" if resume_offset > 0 else "wb" #writes data at the end of the file if resuming, otherwise overwrites
+    # Destination: mirror the source tree for a folder download (dest_subpath
+    # given), else land the file flat under its own name for a single file.
+    final_rel = Path(dest_subpath) if dest_subpath else Path(Path(remote_file_path).name)
+    downloads_root = Path(core.settings["downloads_folder_path"])
+
+    # Temp-first: a download interrupted halfway must not leave a corrupt file
+    # masquerading as complete in Downloads — the temp file IS the resume state.
+    # Namespace it by owner + share-relative path so two files that share a
+    # basename (a/readme.txt vs b/readme.txt) never collide in temp.
+    temp_path = TEMP_FOLDER_PATH / owner_name / (remote_file_path + ".tmp")
+    temp_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "ab" if resume_offset > 0 else "wb" #append when resuming, else overwrite
 
     control_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     control_sock.settimeout(5)
@@ -105,10 +116,13 @@ def download_file(
                 logger.error(f"Hash mismatch for {temp_path}. Expected: {expected_hash}, Actual: {actual_hash}")
                 return False
 
-            # Move the file to the RECV_FOLDER_PATH
-            final_dest = get_unique_filename(RECV_FOLDER_PATH/ filename)
+            # Mirror the source structure under the downloads folder, creating
+            # any intermediate directories before moving the finished file.
+            final_target = downloads_root / final_rel
+            final_target.parent.mkdir(parents=True, exist_ok=True)
+            final_dest = get_unique_filename(final_target)
             os.replace(temp_path, final_dest)
-            logger.info(f"File {filename} downloaded successfully to {final_dest}")
+            logger.info(f"File {remote_file_path} downloaded successfully to {final_dest}")
             return True
         finally:
             data_sock.close()
@@ -195,7 +209,14 @@ def download_folder(
         filesize = item["size"]
         expected_hash = item.get("hash")
 
-        success = download_file(core=core, owner_name=owner_name, remote_file_path=remote_file_path, filesize=filesize, expected_hash=expected_hash)
+        success = download_file(
+            core=core,
+            owner_name=owner_name,
+            remote_file_path=remote_file_path,
+            filesize=filesize,
+            expected_hash=expected_hash,
+            dest_subpath=remote_file_path,  # mirror the share tree under Downloads
+        )
         if not success:
             logger.error(f"Failed to download file {remote_file_path} from {owner_name}")
             overall_success = False
