@@ -533,7 +533,7 @@ class ClientCore:
                 self._teardown_server_socket()
                 return None
 
-    def updated_file_hash_on_server(self,filepath: str,file_hash: str) -> None:
+    def updated_file_hash_on_server(self,filepath: str,file_hash: str) -> bool:
 
         """Pushes a newly calculated file hash to the server for a given relative file path. This is used when a peer requests a file hash that the server does not have cached."""
         if not self.connected or not self.server_socket:
