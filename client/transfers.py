@@ -57,6 +57,9 @@ def download_file(
         return False
 
     #TEMPORARY DOWNLOAD PATH
+    # Why temp-first: a download interrupted halfway must not leave a corrupt
+    # file masquerading as complete in the user's Downloads. The temp file IS
+    # your resume state
     filename = Path(remote_file_path).name
     temp_path = TEMP_FOLDER_PATH/f"{filename}.tmp"
     mode = "ab" if resume_offset > 0 else "wb" #writes data at the end of the file if resuming, otherwise overwrites
