@@ -8,6 +8,7 @@ import msgpack
 
 from utils.constants import (
     CLIENT_RECV_PORT,
+    DIRECT_TEMP_FOLDER_PATH,
     FILE_BUFFER_LEN,
     FMT,
     SHARE_FOLDER_PATH,
@@ -346,7 +347,22 @@ def send_direct_transfer(core: "ClientCore", target_uname: str, local_path: str)
         reply = receive_message(peer_sock)
         if reply["type"] == HeaderCode.DIRECT_TRANSFER_REQUEST:
             logger.info(f"{target_uname} accepted the transfer of '{file_path.name}'.")
-            # --- 4.7.2: stream the file over peer_sock (metadata frame + bytes) ---
+            # 4.7.2: consent granted -> stream the raw bytes over the SAME socket.
+            # size + hash were already agreed in the consent frame, so no header
+            # is sent here; we push exactly `size` bytes (mirrors how
+            # handle_incoming_file_request streams a file back to a requester).
+            remaining = metadata["size"]
+            with open(file_path, "rb") as f:
+                while remaining > 0:
+                    chunk = f.read(min(FILE_BUFFER_LEN, remaining))
+                    if not chunk:
+                        # File shrank since we stat()'d it: the receiver will
+                        # error on the short read and discard its partial.
+                        logger.error(f"'{file_path.name}' ended {remaining} bytes early; aborting send.")
+                        return False
+                    peer_sock.sendall(chunk)
+                    remaining -= len(chunk)
+            logger.info(f"Finished sending '{file_path.name}' ({metadata['size']} bytes) to {target_uname}.")
             return True
 
         logger.error(f"Unexpected reply to direct-transfer request: {reply['type']}")
@@ -397,9 +413,53 @@ def handle_incoming_direct_transfer_request(core: "ClientCore", conn: socket.soc
         send_message(conn, HeaderCode.DIRECT_TRANSFER_REQUEST)
         logger.info(f"Accepted direct transfer of '{safe_name}' ({metadata['size']} bytes) from {sender}.")
 
-        # --- 4.7.2: receive the DIRECT_TRANSFER stream on `conn`, verify the
-        #     hash from metadata, write to DIRECT_TEMP_FOLDER_PATH, then move to
-        #     the downloads folder under safe_name. Not built yet. ---
+        # 4.7.2: the sender now streams exactly `size` raw bytes over THIS
+        # socket (nothing follows the ack but the file). We must consume the
+        # whole stream here, before _handle_connection closes `conn`. Temp-first
+        # + verify + atomic-move mirrors the download path; a push has no
+        # journal/resume, so any failure discards the partial rather than keeping
+        # it. Progress is tracked (no journal) so Phase 5's UI can show a bar.
+        size = metadata["size"]
+        expected_hash = metadata.get("hash")
+        transfer_key = _transfer_key(sender, safe_name)
+
+        temp_dir = DIRECT_TEMP_FOLDER_PATH / sender
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_dir / (safe_name + ".tmp")
+
+        core.start_transfer(transfer_key, total=size, received=0)
+        try:
+            bytes_received = 0
+            with open(temp_path, "wb") as f:
+                while bytes_received < size:
+                    chunk = conn.recv(min(FILE_BUFFER_LEN, size - bytes_received))
+                    if not chunk:
+                        raise OSError("Sender closed the connection before the full file arrived.")
+                    f.write(chunk)
+                    bytes_received += len(chunk)
+                    core.update_transfer(transfer_key, received=bytes_received)
+
+            actual_hash = get_file_hash(str(temp_path))
+            if expected_hash and actual_hash != expected_hash:
+                logger.error(f"Hash mismatch for '{safe_name}' from {sender}. Expected {expected_hash}, got {actual_hash}.")
+                temp_path.unlink(missing_ok=True)
+                core.set_transfer_status(transfer_key, TransferStatus.FAILED)
+                return
+
+            downloads_root = Path(core.settings["downloads_folder_path"])
+            downloads_root.mkdir(parents=True, exist_ok=True)
+            final_dest = get_unique_filename(downloads_root / safe_name)
+            os.replace(temp_path, final_dest)
+            core.set_transfer_status(transfer_key, TransferStatus.COMPLETED)
+            logger.info(f"Received '{safe_name}' ({size} bytes) from {sender}; saved to {final_dest}.")
+            core.notify(f"File received from {sender}", safe_name)
+        except Exception as stream_err:
+            # A push has nothing to resume into, so discard the partial and mark
+            # the transfer failed. Broad catch guarantees no temp file leaks
+            # regardless of how the stream/move failed.
+            logger.error(f"Direct transfer of '{safe_name}' from {sender} failed: {stream_err}")
+            temp_path.unlink(missing_ok=True)
+            core.set_transfer_status(transfer_key, TransferStatus.FAILED)
 
     except RequestException as e:
         # e.g. the peer dropped during the handshake — nothing more to reply to.
