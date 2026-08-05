@@ -60,6 +60,7 @@ class ClientCore:
 
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
         self.transfer_progress: dict[str, TransferProgress] = {}  # Maps transfer ID -> TransferProgress
+        self.pause_events: dict[str, threading.Event] = {}  # Maps transfer ID -> threading.Event for pausing/resuming transfers
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
         self.settings: UserSettings = self._load_settings()
@@ -561,6 +562,9 @@ class ClientCore:
         """Register a new (or resumed) download. received is non-zero on resume"""
 
         with self.transfer_lock:
+            event  = threading.Event()
+            event.set()  # Start in unpaused state
+            self.pause_events[key] = event
             self.transfer_progress[key] = {
                 "status": TransferStatus.DOWNLOADING,
                 "progress": received,
@@ -606,6 +610,28 @@ class ClientCore:
     def remove_transfer(self,key: str) -> None:
         with self.transfer_lock:
             self.transfer_progress.pop(key, None)  # Remove the transfer if it exists, do nothing otherwise
+
+
+    def pause_transfer(self,key: str) -> None:
+        """Signal an active transfer to pause"""
+
+        with self.transfer_lock:
+            event = self.pause_events.get(key)
+            if event:
+                event.clear()
+                rec = self.transfer_progress.get(key)
+                if rec:
+                    rec["status"] = TransferStatus.PAUSED
+                logger.info(f"Transfer '{key}' paused.")
+                return True
+            return False
+
+    def is_transfer_paused(self,key: str) -> bool:
+        """Check if an active transfer is paused"""
+
+        with self.transfer_lock:
+            event = self.pause_events.get(key)
+            return event is not None and not event.is_set()
     
         
 
