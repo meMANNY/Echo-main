@@ -30,6 +30,10 @@ HASH_BUFFER_LEN = 16 * 2 ** 20  # 16MB
 COMPRESSION_THRESHOLD = 500 * 2 ** 20  # 500MB
 # Port [server-side] for communication to the server
 SERVER_RECV_PORT = 1234
+
+# ~/.Echo/db/transfer_journal.json  (sits next to settings.json)
+TRANSFER_JOURNAL_PATH = Path.home() / Path(".Echo/db/transfer_journal.json")
+
 # Maximum size (bytes) for a chat message
 MESSAGE_MAX_LEN = 256
 # Maximum time past the last active timestamp, after which a user is considered offline
