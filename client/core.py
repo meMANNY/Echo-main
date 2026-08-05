@@ -599,6 +599,12 @@ class ClientCore:
                 logger.warning(f"Attempted to set status for non-existent transfer '{key}'.")
                 return
             rec["status"] = status
+        if status == TransferStatus.COMPLETED:
+            self.journal_remove(key)
+        else:
+            self.journal_update_status(key, status)
+
+
 
     def get_transfer(self,key: str) -> Optional[TransferProgress]:
         """Return a SNAPSHOT copy so the ui reads a consistent view lock-free."""
@@ -618,19 +624,19 @@ class ClientCore:
             self.transfer_progress.pop(key, None)  # Remove the transfer if it exists, do nothing otherwise
 
 
-    def pause_transfer(self,key: str) -> None:
-        """Signal an active transfer to pause"""
-
+    def pause_transfer(self, key: str) -> bool:
         with self.transfer_lock:
             event = self.pause_events.get(key)
-            if event:
-                event.clear()
-                rec = self.transfer_progress.get(key)
-                if rec:
-                    rec["status"] = TransferStatus.PAUSED
-                logger.info(f"Transfer '{key}' paused.")
-                return True
-            return False
+            if event is None:
+                return False
+            event.clear()
+            rec = self.transfer_progress.get(key)
+            if rec is not None:
+                rec["status"] = TransferStatus.PAUSED
+        self.journal_update_status(key, TransferStatus.PAUSED)   # after the lock
+        logger.info(f"Transfer '{key}' paused.")
+        return True
+
 
     def is_transfer_paused(self,key: str) -> bool:
         """Check if an active transfer is paused"""

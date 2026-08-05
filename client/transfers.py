@@ -58,6 +58,7 @@ def download_file(
     flat under its own name."""
     transfer_key = _transfer_key(owner_name, remote_file_path)
     core.start_transfer(transfer_key,total = filesize,received = resume_offset)
+    core.journal_start(transfer_key,owner_name,remote_file_path,filesize,resume_offset,expected_hash,dest_subpath)
     owner_ip = core.request_peer_ip(owner_name)
     if not owner_ip:
         logger.error(f"Failed to get IP for owner {owner_name}")
