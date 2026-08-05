@@ -110,6 +110,22 @@ def download_file(
         send_msgpack(control_sock, HeaderCode.FILE_REQUEST, req)
         logger.info(f"Sent file request for {remote_file_path} to {owner_ip}:{data_port}")
 
+        # 4.5.4: if we asked for the hash (first download, none cached), the
+        # sender returns it over the control socket BEFORE streaming. Read it
+        # here so the reassembled file is actually verified below — without this
+        # the first-ever download of any file goes unverified. A short timeout
+        # keeps a stalled peer from hanging us; an ERROR reply (e.g. the sender
+        # rejected the path) raises and lands in the FAILED handler below.
+        if req["request_hash"]:
+            control_sock.settimeout(10)
+            hash_reply = receive_message(control_sock)
+            control_sock.settimeout(None)
+            if hash_reply["type"] == HeaderCode.UPDATE_HASH:
+                expected_hash = hash_reply["query"].decode(FMT)
+                logger.debug(f"Received hash for {remote_file_path}: {expected_hash}")
+            else:
+                logger.warning(f"Expected a hash reply for {remote_file_path}, got {hash_reply['type']}; download will be unverified.")
+
         data_listen_sock.settimeout(10)  # Set a timeout for the data connection
         data_sock,addr = data_listen_sock.accept()
         data_sock.settimeout(10.0)
@@ -182,12 +198,17 @@ def handle_incoming_file_request(core: "ClientCore", conn: socket.socket, peer_i
             logger.warning(f"Rejected file request for {requested_file} from {peer_ip} for invalid path")
             send_error(conn, RequestException(msg="Invalid file path", code=ExceptionCodes.NOT_FOUND))
             return
-        #Lazy hash calculation, only if the requester wants it
-        # If the requester set the request_hash option, the server does not have the hash of the file
-                # so send the updated hash to the server
+        # Lazy hash calculation, only if the requester wants it (first download,
+        # no hash cached yet). Compute once, then (a) RETURN it to the requester
+        # over the control socket so their first download can be integrity-
+        # verified, and (b) push it to the server so future browsers get the
+        # hash without a recompute. Send to the requester first (over the same
+        # socket the request arrived on, BEFORE the data stream) so they aren't
+        # blocked on our server round-trip.
         if request_hash:
             file_hash = get_file_hash(str(requested_file))
-            core.updated_file_hash_on_server(rel_path,file_hash)
+            send_text(conn, HeaderCode.UPDATE_HASH, file_hash)
+            core.updated_file_hash_on_server(rel_path, file_hash)
 
         data_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         data_sock.settimeout(5.0)
