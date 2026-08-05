@@ -27,7 +27,8 @@ from utils.constants import (
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
-from utils.types import DirData, Message, TransferProgress, UserSettings, HeaderCode, ItemSearchResult,TransferStatus
+from utils.types import DirData, Message, TransferProgress, UserSettings, HeaderCode, ItemSearchResult,TransferStatus, JournalEntry
+
 
 
 
@@ -63,11 +64,15 @@ class ClientCore:
         self.pause_events: dict[str, threading.Event] = {}  # Maps transfer ID -> threading.Event for pausing/resuming transfers
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
+        self.journal: dict[str,JournalEntry] = self._load_journal()
         self.settings: UserSettings = self._load_settings()
         self.message_history: dict[str, list[Message]] = {}  # In-memory message history per peer username
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
         self.heartbeat_thread.start()
         self.transfer_lock = threading.Lock()  # Lock to synchronize access to transfer_progress
+        self.journal_lock = threading.Lock() #guards the journal and file write
+        
+
         logger.info("Heartbeat thread started.")
 
         logger.info(
