@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _transfer_key(owner_name: str, remote_file_path: str) -> str:
+    """Stable key for a transfer's progress + pause state (owner + share path)."""
+    return f"{owner_name}:{remote_file_path}"
+
+
 def download_file(
         core: "ClientCore",
         owner_name: str,
@@ -44,7 +50,7 @@ def download_file(
     land. Folder downloads pass the file's share-relative path so the source
     tree is mirrored; a single-file download leaves it None and the file lands
     flat under its own name."""
-    transfer_key = f"{owner_name}:{remote_file_path}"
+    transfer_key = _transfer_key(owner_name, remote_file_path)
     core.start_transfer(transfer_key,total = filesize,received = resume_offset)
     owner_ip = core.request_peer_ip(owner_name)
     if not owner_ip:
@@ -62,6 +68,8 @@ def download_file(
         logger.debug(f"Data listening on port {data_port}")
     except OSError as e:
         logger.error(f"Failed to bind data socket: {e}")
+        core.set_transfer_status(transfer_key, TransferStatus.FAILED)
+        data_listen_sock.close()
         return False
 
     # Destination: mirror the source tree for a folder download (dest_subpath
@@ -105,8 +113,8 @@ def download_file(
             with open(temp_path,mode) as f:
                 while bytes_received < bytes_to_receive:
                     if core.is_transfer_paused(transfer_key):
-                        logger.info(f"Transfer {transfer_key} paused. Waiting to resume...")
-                        return False  # Exit the function to allow for pausing; the transfer can be resumed later
+                        logger.info(f"Transfer {transfer_key} paused; exiting (resume re-issues the request). Partial file kept at {temp_path}.")
+                        return False  # Status stays PAUSED (set by pause_transfer); caller distinguishes via get_transfer
                     chunk_size = min(FILE_BUFFER_LEN, bytes_to_receive - bytes_received)
                     chunk = data_sock.recv(chunk_size)
                     
@@ -228,6 +236,13 @@ def download_folder(
             dest_subpath=remote_file_path,  # mirror the share tree under Downloads
         )
         if not success:
+            # A False return can mean PAUSED (resume later) or genuinely FAILED.
+            # Consult the transfer status to tell them apart: a pause stops the
+            # whole folder, but a single failed file doesn't halt the rest.
+            rec = core.get_transfer(_transfer_key(owner_name, remote_file_path))
+            if rec is not None and rec["status"] == TransferStatus.PAUSED:
+                logger.info(f"Folder download paused at {remote_file_path}; remaining files not started.")
+                return False
             logger.error(f"Failed to download file {remote_file_path} from {owner_name}")
             overall_success = False
 
