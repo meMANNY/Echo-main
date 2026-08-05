@@ -553,7 +553,7 @@ class ClientCore:
                 logger.error(f"Failed to update file hash on server for '{filepath}': {e}", exc_info=True)
                 self._teardown_server_socket()
                 return False
-                
+    @staticmethod
     def _percent(received: int, total: int) -> float:
         return (received / total * 100) if total > 0 else 100.0
 
