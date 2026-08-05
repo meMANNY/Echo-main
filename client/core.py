@@ -523,6 +523,20 @@ class ClientCore:
             rec["progress"] = received
             rec["percent_progress"] = self._percent(received, rec["total"])
 
+            t = self._transfer_timing.get(key)
+            if t is not None:
+                dt = now - t["last_t"]
+                if dt >= 0.25:
+                    inst_bps = (received - t["last_bytes"]) / dt if dt > 0 else 0.0
+                    t["ema_bps"] = inst_bps if t["ema_bps"] is None else (
+                    _SPEED_ALPHA * inst_bps + (1 - _SPEED_ALPHA) * t["ema_bps"]
+                )
+                t["last_t"] = now
+                t["last_bytes"] = received
+                rec["speed_bps"] = t["ema_bps"]
+                remaining = max(rec["total"] - received, 0)
+                rec["eta_seconds"] =  (remaining / t["ema_bps"]) if t["ema_bps"] > 0 else None
+
     def set_transfer_status(self,key: str, status: TransferStatus) -> None:
         """Update the status of an active transfer."""
 
