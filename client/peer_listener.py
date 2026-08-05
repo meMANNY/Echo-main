@@ -3,7 +3,7 @@ import socket
 import threading
 from typing import TYPE_CHECKING
 
-from utils.constants import CLIENT_RECV_PORT,FMT
+from utils.constants import CLIENT_RECV_PORT,FMT,PEER_SOCKET_TIMEOUT
 from utils.exceptions import RequestException, ExceptionCodes
 from utils.protocol import receive_message, send_error
 from utils.types import HeaderCode
@@ -69,6 +69,12 @@ class PeerListener:
 
         """ Handle an incoming connection from a peer. """
         try:
+            # Improvement B: accept() returns a BLOCKING socket, so without this
+            # a peer that connects and never sends (or stalls mid direct-transfer
+            # stream) would pin this worker thread + socket forever. settimeout is
+            # per-recv, so a healthy stream just resets it on every chunk; a real
+            # stall raises socket.timeout -> handled as a normal disconnect below.
+            conn.settimeout(PEER_SOCKET_TIMEOUT)
             msg = receive_message(conn)
 
             match msg['type']:

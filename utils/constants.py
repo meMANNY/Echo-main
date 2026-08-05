@@ -22,6 +22,10 @@ TEMP_FOLDER_PATH = Path.home() / Path(".Echo/tmp")
 DIRECT_TEMP_FOLDER_PATH = Path.home() / Path(".Echo/direct")
 # Path for temp storage of incomplete direct downloads
 USER_SETTINGS_PATH = Path.home() / Path(".Echo/db/settings.json")
+# Idle timeout (seconds) for an accepted peer connection. Bounds how long a
+# peer that connects but stalls (silent, or mid-transfer) can pin a worker
+# thread + socket. Applied per-recv, so a healthy stream resets it each chunk.
+PEER_SOCKET_TIMEOUT = 30
 # Size of file read buffer
 FILE_BUFFER_LEN = 16 * 2 ** 10  # 16KB
 # Size of hash calculator buffer

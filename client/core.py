@@ -26,9 +26,10 @@ from utils.constants import (
     TRANSFER_JOURNAL_PATH,
 )
 from utils.exceptions import ExceptionCodes, RequestException
-from utils.protocol import send_text, receive_message, send_msgpack
+from utils.protocol import send_text  # peer chat send; server I/O goes through ServerConnection
 from utils.socket_functions import update_share_data,request_ip,request_uname
 from utils.types import DirData, FileMetaData, Message, TransferProgress, UserSettings, HeaderCode, ItemSearchResult,TransferStatus, JournalEntry
+from client.server_connection import ServerConnection, TRANSPORT_FAILURE_CODES
 
 
 
@@ -50,16 +51,13 @@ class ClientCore:
         logger.info("Initializing ClientCore")
 
         #State properties
-        self.server_socket: Optional[socket.socket] = None
-        self.connected: bool = False
+        # The persistent server connection owns its own socket AND the lock that
+        # serializes it (Improvement A) — no method here can forget to lock, and
+        # transport-failure teardown lives in one place instead of every caller.
+        self.server = ServerConnection()
+        self._registered: bool = False  # True only after a successful register()
 
-        self.server_lock = threading.Lock()
-        #A lock is required to ensure that only one thread at a time can send/receive messages on the server socket. 
-        # This prevents interleaving of messages and ensures thread safety.
-        #GIL is ineffective here because socket operations can release the GIL, allowing other threads to run and potentially access the socket concurrently.
-        #so because the architecture here is to send-recv in pairs, we need to ensure that only one thread is doing that at a time.
         #Peer tracking
-
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
         self.transfer_progress: dict[str, TransferProgress] = {}  # Maps transfer ID -> TransferProgress
         self.pause_events: dict[str, threading.Event] = {}  # Maps transfer ID -> threading.Event for pausing/resuming transfers
@@ -76,11 +74,12 @@ class ClientCore:
         self.journal: dict[str,JournalEntry] = self._load_journal()
         self.settings: UserSettings = self._load_settings()
         self.message_history: dict[str, list[Message]] = {}  # In-memory message history per peer username
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
-        self.heartbeat_thread.start()
         self.transfer_lock = threading.Lock()  # Lock to synchronize access to transfer_progress
         self.journal_lock = threading.Lock() #guards the journal and file write
-        
+        # Start heartbeat last, once every field it might touch exists.
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
+        self.heartbeat_thread.start()
+
 
         logger.info("Heartbeat thread started.")
 
@@ -164,120 +163,68 @@ class ClientCore:
         except OSError as e:
             logger.error(f"Failed to save user settings: {e}")
     
+    @property
+    def connected(self) -> bool:
+        """Registered AND the socket is still open. Because ServerConnection
+        clears the socket on a transport failure, this reflects reality without
+        a separate flag to keep in sync — the old manual self.connected=False
+        scattered through every error path is gone."""
+        return self._registered and self.server.is_open
+
     def connect_to_server(self,server_ip: str) -> bool:
-        """ Established a socket connection to the central server."""
-        with self.server_lock:
-            #IF already connected, close the existing socket before creating a new one
-            if self.server_socket:
-                try:
-                    self.server_socket.close()
-                    self.connected = False
-                    logger.info("Closed existing server socket before establishing a new connection.")
-                except OSError as e:
-                    logger.error(f"Error closing existing server socket: {e}", exc_info=True)
-                    
-
-            try:
-                self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-                CONNECTION_TIMEOUT = 5  # seconds
-                self.server_socket.settimeout(CONNECTION_TIMEOUT)
-                logger.info(f"Attempting to connect to server at {server_ip}:{SERVER_RECV_PORT} with timeout {CONNECTION_TIMEOUT}s...")
-                #Bind local port if requested or let os choose
-                self.server_socket.connect((server_ip, SERVER_RECV_PORT))
-                self.server_socket.settimeout(None)  # Remove timeout after successful connection
-                self.settings["server_ip"] = server_ip
-                self.save_settings(self.settings)  # Persist the new server IP
-                logger.info(f"Connected to server at {server_ip}:{SERVER_RECV_PORT}")
-                return True
-            except (socket.timeout, OSError) as e:
-                if self.server_socket:
-                    try:
-                        self.server_socket.close()
-                        logger.debug("Server socket closed after failed connection attempt.")
-                    except OSError as close_error:
-                        logger.error(f"Error closing server socket after failed connection: {close_error}", exc_info=True)
-                        
-                self.server_socket = None
-                if isinstance(e, socket.timeout):
-                    logger.error(f"Connection to server at {server_ip}:{SERVER_RECV_PORT} timed out.")
-                else:
-                    logger.error(f"Failed to connect to server at {server_ip}:{SERVER_RECV_PORT}: {e}", exc_info=True)
-                return False
-        
-    def _teardown_server_socket(self) -> None:
-        """ Closes and clears the server socket after a transport failure.
-        Caller must already hold server_lock. """
-
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-                logger.debug("Server socket closed after transport failure.")
-            except OSError as e:
-                logger.error(f"Error closing server socket: {e}", exc_info=True)
-        self.server_socket = None
-        self.connected = False
+        """ Establish a socket connection to the central server. Returns True on
+        success. The socket + its lock live in ServerConnection now. """
+        # A fresh socket is unregistered until register() runs on it.
+        self._registered = False
+        if not self.server.connect(server_ip):
+            return False
+        self.settings["server_ip"] = server_ip
+        self.save_settings(self.settings)  # Persist the new server IP
+        return True
 
     def register(self, username: str) -> bool:
         """ Performs the new connection registration with the server. Returns True if successful, False otherwise. """
 
-        if not self.server_socket:
+        if not self.server.is_open:
             logger.error("Cannot register: No server connection established.")
             return False
-        
-        with self.server_lock:
-            try:
-                #Send registration request
-                send_text(self.server_socket, HeaderCode.NEW_CONNECTION,username)
 
-                #Wait for server response
-                response = receive_message(self.server_socket)
+        try:
+            response = self.server.request(HeaderCode.NEW_CONNECTION, username)
 
-                if response["type"] == HeaderCode.NEW_CONNECTION:
-                    logger.info(f"Registration successful for username='{username}'")
-                    self.settings["uname"] = username
-                    self.save_settings(self.settings)  # Persist the new username
-                    self.connected = True
-                    self.first_run = False  # Update first_run flag after successful registration
-                    return True
-                
-                else:
-                    logger.error(f"Unexpected response from server during registration: {response}")
-                    return False
-                
-            except RequestException as e:
-                if e.code == ExceptionCodes.USER_EXISTS:
-                    logger.warning(f"Registration failed: Username '{username}' already taken by another host.")
-                elif e.code == ExceptionCodes.BAD_REQUEST:
-                    #reconnection
-                    self.settings["uname"] = username
-                    self.save_settings(self.settings)  # Persist the new username
-                    self.connected = True
-                    self.first_run = False  # Update first_run flag after successful registration
-                    logger.info(f"Reconnection successful for username='{username}'")
-                    return True
+            if response["type"] == HeaderCode.NEW_CONNECTION:
+                logger.info(f"Registration successful for username='{username}'")
+                self.settings["uname"] = username
+                self.save_settings(self.settings)  # Persist the new username
+                self._registered = True
+                self.first_run = False  # Update first_run flag after successful registration
+                return True
 
-                elif e.code in (
-                    ExceptionCodes.DISCONNECT,
-                    ExceptionCodes.INVALID_HEADER,
-                    ExceptionCodes.INCOMPLETE,
-                ):
-                    #Transport-level failure (receive_message wraps recv-side
-                    #OSErrors as DISCONNECT) — the socket is no longer
-                    #trustworthy, so tear it down like the OSError path below.
-                    logger.error(f"Connection to server lost during registration: {e.msg}")
-                    self._teardown_server_socket()
+            logger.error(f"Unexpected response from server during registration: {response}")
+            return False
 
-                else:
-                    logger.error(f"Registration failed with error code {e.code}: {e}")
+        except RequestException as e:
+            if e.code == ExceptionCodes.USER_EXISTS:
+                logger.warning(f"Registration failed: Username '{username}' already taken by another host.")
+            elif e.code == ExceptionCodes.BAD_REQUEST:
+                #reconnection (same host re-registering) — socket is still good.
+                self.settings["uname"] = username
+                self.save_settings(self.settings)  # Persist the new username
+                self._registered = True
+                self.first_run = False  # Update first_run flag after successful registration
+                logger.info(f"Reconnection successful for username='{username}'")
+                return True
+            elif e.code in TRANSPORT_FAILURE_CODES:
+                #ServerConnection already tore the socket down; connected is now False.
+                logger.error(f"Connection to server lost during registration: {e.msg}")
+            else:
+                logger.error(f"Registration failed with error code {e.code}: {e}")
+            return False
 
-                return False
-            
-            except OSError as e:
-                logger.error(f"Registration failed due to socket error: {e}", exc_info=True)
-                self._teardown_server_socket()
-                return False
+        except OSError as e:
+            #ServerConnection already tore the socket down.
+            logger.error(f"Registration failed due to socket error: {e}", exc_info=True)
+            return False
 
     def publish_share_data(self) -> bool:
         """ Publishes the client's share folder tree to the server.
@@ -287,56 +234,45 @@ class ClientCore:
         True if the publish round-trip completed without a transport failure,
         False otherwise. """
 
-        if not self.connected or not self.server_socket:
+        if not self.connected:
             logger.error("Cannot publish share data: client is not registered with the server.")
             return False
 
         share_path = Path(self.settings["share_folder_path"])
 
-        with self.server_lock:
-            try:
-                #update_share_data walks share_path, msgpacks the children,
-                #sends SHARE_DATA and reads the ack. Transport failures surface
-                #as OSError (send side) or RequestException (recv side); both are
-                #caught below and trigger a teardown.
-                update_share_data(share_path, self.server_socket)
-                logger.info(f"Published share data from '{share_path}' to the server.")
-                return True
-            except (OSError, RequestException) as e:
-                logger.error(f"Failed to publish share data due to socket error: {e}", exc_info=True)
-                self._teardown_server_socket()
-                return False
+        try:
+            # update_share_data walks share_path, msgpacks the children, sends
+            # SHARE_DATA and reads the ack — a multi-step exchange, so it runs
+            # under the lock via server.run(). Transport failures tear the
+            # socket down there and surface here as OSError/RequestException.
+            self.server.run(lambda sock: update_share_data(share_path, sock))
+            logger.info(f"Published share data from '{share_path}' to the server.")
+            return True
+        except (OSError, RequestException) as e:
+            logger.error(f"Failed to publish share data due to socket error: {e}", exc_info=True)
+            return False
     
     def _heartbeat_loop(self) -> None:
 
         """Periodically sends heartbeat messages to the server and checks for online peers."""
 
         while True:
-            if self.connected and self.server_socket:
+            if self.connected:
                 try:
-                    with self.server_lock:
-                        send_text(self.server_socket,HeaderCode.HEARTBEAT_REQUEST,"1")
-                        reply = receive_message(self.server_socket)
-
+                    reply = self.server.request(HeaderCode.HEARTBEAT_REQUEST, "1")
                     if reply["type"] == HeaderCode.HEARTBEAT_REQUEST:
                         # Update online peers based on the server's response
                         peer_status = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded dict
                         self._update_online_peers(peer_status)
                 except RequestException as e:
-                    if e.code in (
-                        ExceptionCodes.DISCONNECT,
-                        ExceptionCodes.INVALID_HEADER,
-                        ExceptionCodes.INCOMPLETE,
-                    ):
-                        logger.error(f"Connection to server lost during heartbeat ({e.code.name}): {e.msg}. Tearing down socket.")
-                        with self.server_lock:
-                            self._teardown_server_socket()
+                    if e.code in TRANSPORT_FAILURE_CODES:
+                        #ServerConnection already tore the socket down; connected flips False.
+                        logger.error(f"Connection to server lost during heartbeat ({e.code.name}): {e.msg}.")
                     else:
                         logger.warning(f"Heartbeat failed with RequestException: {e.msg}")
                 except OSError as e:
+                    #ServerConnection already tore the socket down.
                     logger.error(f"Heartbeat failed due to network error: {e}", exc_info=True)
-                    with self.server_lock:
-                        self._teardown_server_socket()
                 except Exception as e:
                     logger.error(f"Unexpected error in heartbeat loop: {e}", exc_info=True)
             time.sleep(HEARTBEAT_TIMER)
@@ -360,27 +296,32 @@ class ClientCore:
     def request_peer_ip(self,username: str) -> Optional[str]:
         """ Queries the server for the IP address of a given peer username. Returns the IP address as a string if found, or None if not found or on error. """
 
-        if not self.connected or not self.server_socket:
+        if not self.connected:
             logger.error("Cannot request peer IP: client is not registered with the server.")
             return None
-        with self.server_lock:
-            
-                ip = request_ip(username,self.server_socket)
-                logger.info(f"Received IP for peer '{username}': {ip}")
-                return ip
-            
-    
+        try:
+            ip = self.server.run(lambda sock: request_ip(username, sock))
+            logger.info(f"Received IP for peer '{username}': {ip}")
+            return ip
+        except (OSError, RequestException) as e:
+            #request_ip already swallows semantic errors; this only catches a raw
+            #transport failure (which server.run has torn the socket down for).
+            logger.error(f"Failed to request IP for '{username}': {e}")
+            return None
+
     def request_peer_uname(self,ip: str) -> Optional[str]:
         """ Queries the server for the username of a given peer IP address. Returns the username as a string if found, or None if not found or on error. """
 
-        if not self.connected or not self.server_socket:
+        if not self.connected:
             logger.error("Cannot request peer username: client is not registered with the server.")
             return None
-        with self.server_lock:
-            
-                uname = request_uname(ip,self.server_socket)
-                logger.info(f"Received username for IP '{ip}': {uname}")
-                return uname
+        try:
+            uname = self.server.run(lambda sock: request_uname(ip, sock))
+            logger.info(f"Received username for IP '{ip}': {uname}")
+            return uname
+        except (OSError, RequestException) as e:
+            logger.error(f"Failed to request username for IP '{ip}': {e}")
+            return None
     
     def add_message_to_history(self,peer_uname: str,content: str,is_self: bool) -> None:
         """ Appends a message to the in-memory message history for a given peer. """
@@ -462,51 +403,40 @@ class ClientCore:
         """ Fetches the shared file directory tree for a target user.
         Returns a list of DirData objects representing the directory tree, or None on failure. """
 
-        if not self.connected or not self.server_socket:
+        if not self.connected:
             logger.error("Cannot browse: client is not registered with the server.")
             return None
-        
-        with self.server_lock:
-            try:
 
-                send_text(self.server_socket,HeaderCode.FILE_BROWSE,target_uname)
+        try:
+            reply = self.server.request(HeaderCode.FILE_BROWSE, target_uname)
+            if reply["type"] == HeaderCode.FILE_BROWSE:
+                #Unpack record
+                doc = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded list of DirData
+                share_tree = doc.get("share", [])
+                logger.info(f"Received share data for {target_uname}. Total items: {len(share_tree)}")
+                return share_tree
 
-                reply = receive_message(self.server_socket)
-                if reply["type"] == HeaderCode.FILE_BROWSE:
+            logger.error(f"Unexpected response from server during browse: {reply}")
+            return None
 
-                    #Unpack record
-                    doc = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded list of DirData
-                    share_tree = doc.get("share", [])
-                    logger.info(f"Received share data for {target_uname}. Total items: {len(share_tree)}")
-
-                    return share_tree
-                else:
-                    logger.error(f"Unexpected response from server during browse: {reply}")
-                    return None
-            
-            except RequestException as e:
-                if e.code == ExceptionCodes.NOT_FOUND:
-                    logger.warning(f"Browse failed: User '{target_uname}' not found on server.")
-                elif e.code in (
-                    ExceptionCodes.DISCONNECT,
-                    ExceptionCodes.INVALID_HEADER,
-                    ExceptionCodes.INCOMPLETE,
-                ):
-                    logger.error(f"Connection to server lost during browse ({e.code.name}): {e.msg}. Tearing down socket.")
-                    self._teardown_server_socket()
-                else:
-                    logger.error(f"Browse failed with error code {e.code}: {e}")
-                return None
-            except OSError as e:
-                logger.error(f"Browse failed due to socket error: {e}", exc_info=True)
-                self._teardown_server_socket()
-                return None
+        except RequestException as e:
+            if e.code == ExceptionCodes.NOT_FOUND:
+                logger.warning(f"Browse failed: User '{target_uname}' not found on server.")
+            elif e.code in TRANSPORT_FAILURE_CODES:
+                #ServerConnection already tore the socket down.
+                logger.error(f"Connection to server lost during browse ({e.code.name}): {e.msg}.")
+            else:
+                logger.error(f"Browse failed with error code {e.code}: {e}")
+            return None
+        except OSError as e:
+            logger.error(f"Browse failed due to socket error: {e}", exc_info=True)
+            return None
     
     def search(self,query: str) -> Optional[list[ItemSearchResult]]:
 
         """ Searches the shares of all online peers for items matching the query string."""
 
-        if not self.connected or not self.server_socket:
+        if not self.connected:
             logger.error("Cannot search: client is not registered with the server.")
             return None
 
@@ -514,60 +444,47 @@ class ClientCore:
         if not clean_query:
             logger.warning("Search query is empty after stripping whitespace.")
             return []
-        
+
         #Escape client side regex errors.
         #Can cause client side error , to be handled gracefully.
-        safe_query = re.escape(clean_query) 
+        safe_query = re.escape(clean_query)
 
-        with self.server_lock:
-            try:
-                send_text(self.server_socket,HeaderCode.FILE_SEARCH,safe_query)
-                reply = receive_message(self.server_socket)
+        try:
+            reply = self.server.request(HeaderCode.FILE_SEARCH, safe_query)
+            if reply["type"] == HeaderCode.FILE_SEARCH:
+                results = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded list of ItemSearchResult
+                logger.info(f"Received search results for query '{query}'. Total items found: {len(results)}")
+                return results
 
-                if reply["type"] == HeaderCode.FILE_SEARCH:
-
-                    results = msgpack.unpackb(reply["query"], raw=False)  # Assuming the server sends a msgpack-encoded list of ItemSearchResult
-                    logger.info(f"Received search results for query '{query}'. Total items found: {len(results)}")
-                    return results
-                else:
-                    logger.error(f"Unexpected response from server during search: {reply}")
-                    return None
-            except RequestException as e:
-                if e.code in (
-                    ExceptionCodes.DISCONNECT,
-                    ExceptionCodes.INVALID_HEADER,
-                    ExceptionCodes.INCOMPLETE,
-                ):
-                    logger.error(f"Connection to server lost during search ({e.code.name}): {e.msg}. Tearing down socket.")
-                    self._teardown_server_socket()
-                else:
-                    logger.error(f"Search failed with error code {e.code}: {e}")
-                    
-                return None
-            except OSError as e:
-                logger.error(f"Search failed due to socket error: {e}", exc_info=True)
-                self._teardown_server_socket()
-                return None
+            logger.error(f"Unexpected response from server during search: {reply}")
+            return None
+        except RequestException as e:
+            if e.code in TRANSPORT_FAILURE_CODES:
+                #ServerConnection already tore the socket down.
+                logger.error(f"Connection to server lost during search ({e.code.name}): {e.msg}.")
+            else:
+                logger.error(f"Search failed with error code {e.code}: {e}")
+            return None
+        except OSError as e:
+            logger.error(f"Search failed due to socket error: {e}", exc_info=True)
+            return None
 
     def updated_file_hash_on_server(self,filepath: str,file_hash: str) -> bool:
 
         """Pushes a newly calculated file hash to the server for a given relative file path. This is used when a peer requests a file hash that the server does not have cached."""
-        if not self.connected or not self.server_socket:
+        if not self.connected:
             return False
 
         payload = {
             "filepath": filepath,
             "hash": file_hash
         }
-        with self.server_lock:
-            try: 
-                send_msgpack(self.server_socket,HeaderCode.UPDATE_HASH,payload)
-                reply = receive_message(self.server_socket)
-                return reply["type"] == HeaderCode.UPDATE_HASH
-            except(RequestException,OSError) as e:
-                logger.error(f"Failed to update file hash on server for '{filepath}': {e}", exc_info=True)
-                self._teardown_server_socket()
-                return False
+        try:
+            reply = self.server.request(HeaderCode.UPDATE_HASH, payload, msgpack_body=True)
+            return reply["type"] == HeaderCode.UPDATE_HASH
+        except (RequestException, OSError) as e:
+            logger.error(f"Failed to update file hash on server for '{filepath}': {e}", exc_info=True)
+            return False
     @staticmethod
     def _percent(received: int, total: int) -> float:
         return (received / total * 100) if total > 0 else 100.0
