@@ -41,6 +41,8 @@ class TransferProgress(TypedDict):
     progress: int
     percent_progress: float
     total: int
+    speed_bps: float
+    eta_seconds: Optional[float]
 
 class ProgressBarData(TypedDict):
     current: int
