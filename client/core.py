@@ -569,6 +569,7 @@ class ClientCore:
     def remove_transfer(self,key: str) -> None:
         with self.transfer_lock:
             self.transfer_progress.pop(key, None)  # Remove the transfer if it exists, do nothing otherwise
+            self._transfer_timing.pop(key,None)
 
 
     def pause_transfer(self, key: str) -> bool:
@@ -658,6 +659,16 @@ class ClientCore:
                 logger.error(f"Direct-transfer consent callback failed: {e}; rejecting.")
                 return False
         return self.auto_accept_transfers
+
+    def format_speed(bps: float) -> str:
+        return f"{convert_size(int(bps))}/s" if bps > 0 else "--"
+
+    def format_eta(seconds: Optional[float]) -> str:
+        if seconds is None:
+            return "--"
+        s = int(seconds); h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
+        return f"{h}h {m}m" if h else (f"{m}m {s}s" if m else f"{s}s")
+
 
             
 
