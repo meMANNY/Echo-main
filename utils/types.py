@@ -1,6 +1,6 @@
 from enum import Enum
 
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple, Optional, TypedDict
 
 
 class HeaderCode(Enum):
@@ -95,6 +95,15 @@ class UserSettings(TypedDict):
 class Message(TypedDict):
     sender: str
     content: str
+
+class JournalEntry(TypedDict):
+    uname: str
+    filepath: str
+    total: int
+    received: int
+    status: int
+    hash: Optional[str] #expected hash , for end verification on resume
+    dest_subpath: Optional[str] #folder-mirror destination
     
 
     
