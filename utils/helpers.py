@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+from typing import Optional
 from pathlib import Path
 
 from utils.constants import HASH_BUFFER_LEN, TEMP_FOLDER_PATH   
@@ -225,6 +226,16 @@ def print_share_tree(items: list[DirData] | None, indent: int = 0) -> None:
             children = item.get("children", [])
             if children:
                 print_share_tree(children, indent + 1)
+
+def format_speed(bps: float) -> str:
+        return f"{convert_size(int(bps))}/s" if bps > 0 else "--"
+
+def format_eta(seconds: Optional[float]) -> str:
+        if seconds is None:
+            return "--"
+        s = int(seconds); h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
+        return f"{h}h {m}m" if h else (f"{m}m {s}s" if m else f"{s}s")
+
     
 
 

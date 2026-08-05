@@ -531,11 +531,11 @@ class ClientCore:
                     t["ema_bps"] = inst_bps if t["ema_bps"] is None else (
                     _SPEED_ALPHA * inst_bps + (1 - _SPEED_ALPHA) * t["ema_bps"]
                 )
-                t["last_t"] = now
-                t["last_bytes"] = received
-                rec["speed_bps"] = t["ema_bps"]
-                remaining = max(rec["total"] - received, 0)
-                rec["eta_seconds"] =  (remaining / t["ema_bps"]) if t["ema_bps"] > 0 else None
+                    t["last_t"] = now
+                    t["last_bytes"] = received
+                    rec["speed_bps"] = t["ema_bps"]
+                    remaining = max(rec["total"] - received, 0)
+                    rec["eta_seconds"] =  (remaining / t["ema_bps"]) if t["ema_bps"] > 0 else None
 
     def set_transfer_status(self,key: str, status: TransferStatus) -> None:
         """Update the status of an active transfer."""
@@ -660,15 +660,7 @@ class ClientCore:
                 return False
         return self.auto_accept_transfers
 
-    def format_speed(bps: float) -> str:
-        return f"{convert_size(int(bps))}/s" if bps > 0 else "--"
-
-    def format_eta(seconds: Optional[float]) -> str:
-        if seconds is None:
-            return "--"
-        s = int(seconds); h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
-        return f"{h}h {m}m" if h else (f"{m}m {s}s" if m else f"{s}s")
-
+    
 
             
 
