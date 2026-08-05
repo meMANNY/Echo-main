@@ -120,9 +120,9 @@ class PeerListener:
         
 
     def _handle_direct_transfer_request(self, conn: socket.socket, peer_ip: str, query: bytes) -> None:
-
-        #Placeholder for session 8 pushes
-        pass
+        """Dispatches an incoming direct-transfer (push) request to the handler."""
+        from client.transfers import handle_incoming_direct_transfer_request
+        handle_incoming_direct_transfer_request(self.core, conn, peer_ip, query)
 
     def stop(self) -> None:
         """ Stop the peer listener and close the socket. """

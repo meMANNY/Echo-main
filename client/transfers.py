@@ -15,8 +15,8 @@ from utils.constants import (
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.helpers import get_file_hash, get_files_in_dir, get_unique_filename
-from utils.protocol import receive_message, send_msgpack, send_text,send_error
-from utils.types import DirData, FileRequest, HeaderCode, TransferStatus
+from utils.protocol import receive_message, send_message, send_msgpack, send_text,send_error
+from utils.types import CompressionMethod, DirData, FileMetaData, FileRequest, HeaderCode, TransferStatus
 
 #Import only for type hints: a runtime import of client.core would create a
 #circular dependency once ClientCore instantiates PeerListener -> transfers.
@@ -305,6 +305,107 @@ def resume_download(
         expected_hash=expected_hash,
         dest_subpath=dest_subpath,
     )
+
+
+def send_direct_transfer(core: "ClientCore", target_uname: str, local_path: str) -> bool:
+    """Push a file to a specific user — consent handshake (step 4.7.1).
+
+    Resolves the target, sends DIRECT_TRANSFER_REQUEST with the file metadata,
+    and waits for the receiver's decision: a bare-frame ack means accepted, an
+    'e' reply raises RequestException (UNAUTHORIZED == declined). Returns True
+    if accepted. The actual byte stream over the same socket is step 4.7.2."""
+
+    file_path = Path(local_path)
+    if not file_path.is_file():
+        logger.error(f"Cannot send: '{local_path}' is not a file.")
+        return False
+
+    target_ip = core.request_peer_ip(target_uname)
+    if not target_ip:
+        logger.error(f"Cannot send: could not resolve IP for '{target_uname}' (offline?).")
+        return False
+
+    # Metadata the receiver consents to. compression is an enum -> send .value
+    # so msgpack can serialize it. The hash lets the receiver verify (4.7.2).
+    metadata: FileMetaData = {
+        "path": file_path.name,
+        "size": file_path.stat().st_size,
+        "hash": get_file_hash(str(file_path)),
+        "compression": CompressionMethod.NONE.value,
+    }
+
+    peer_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    peer_sock.settimeout(5.0)
+    try:
+        peer_sock.connect((target_ip, CLIENT_RECV_PORT))
+        peer_sock.settimeout(None)  # Remove timeout after connection
+
+        send_msgpack(peer_sock, HeaderCode.DIRECT_TRANSFER_REQUEST, metadata)
+        logger.info(f"Requested to send '{file_path.name}' to {target_uname}; awaiting consent...")
+
+        reply = receive_message(peer_sock)
+        if reply["type"] == HeaderCode.DIRECT_TRANSFER_REQUEST:
+            logger.info(f"{target_uname} accepted the transfer of '{file_path.name}'.")
+            # --- 4.7.2: stream the file over peer_sock (metadata frame + bytes) ---
+            return True
+
+        logger.error(f"Unexpected reply to direct-transfer request: {reply['type']}")
+        return False
+
+    except RequestException as e:
+        if e.code == ExceptionCodes.UNAUTHORIZED:
+            logger.info(f"{target_uname} declined the transfer of '{file_path.name}'.")
+        else:
+            logger.error(f"Direct-transfer request to {target_uname} failed: {e.msg}")
+        return False
+    except OSError as e:
+        logger.error(f"Failed to reach {target_uname} at {target_ip}: {e}")
+        return False
+    finally:
+        peer_sock.close()
+
+
+def handle_incoming_direct_transfer_request(core: "ClientCore", conn: socket.socket, peer_ip: str, query: bytes) -> None:
+    """Consent handshake for an inbound direct transfer / push (step 4.7.1).
+
+    Unpacks the sender's FileMetaData, asks the consent policy, and either acks
+    (accept) or replies UNAUTHORIZED (reject). On accept the same socket stays
+    open for the byte stream (step 4.7.2)."""
+
+    try:
+        metadata: FileMetaData = msgpack.unpackb(query, raw=False)
+
+        # Validate the shape before trusting it.
+        if not isinstance(metadata, dict) or "path" not in metadata or "size" not in metadata:
+            logger.warning(f"Malformed direct-transfer request from {peer_ip}.")
+            send_error(conn, RequestException(msg="Malformed transfer metadata", code=ExceptionCodes.BAD_REQUEST))
+            return
+
+        # The SENDER chose `path`, and it dictates where the file lands on OUR
+        # disk — strip any directory components so a '../' can't escape the
+        # downloads folder (4.7.2 saves under this name).
+        safe_name = Path(metadata["path"]).name
+        sender = core.request_peer_uname(peer_ip) or peer_ip
+
+        if not core.should_accept_transfer(metadata):
+            logger.info(f"Direct transfer of '{safe_name}' from {sender} rejected.")
+            send_error(conn, RequestException(msg="Transfer declined by recipient", code=ExceptionCodes.UNAUTHORIZED))
+            return
+
+        # Accept: bare-frame ack (same shape as the registration ack). The
+        # sender's receive_message sees this type and knows it may stream.
+        send_message(conn, HeaderCode.DIRECT_TRANSFER_REQUEST)
+        logger.info(f"Accepted direct transfer of '{safe_name}' ({metadata['size']} bytes) from {sender}.")
+
+        # --- 4.7.2: receive the DIRECT_TRANSFER stream on `conn`, verify the
+        #     hash from metadata, write to DIRECT_TEMP_FOLDER_PATH, then move to
+        #     the downloads folder under safe_name. Not built yet. ---
+
+    except RequestException as e:
+        # e.g. the peer dropped during the handshake — nothing more to reply to.
+        logger.warning(f"Direct-transfer request from {peer_ip} failed: {e.msg}")
+    except Exception as e:
+        logger.error(f"Error handling direct-transfer request from {peer_ip}: {e}", exc_info=True)
 
 
 

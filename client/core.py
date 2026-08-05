@@ -5,7 +5,7 @@ import threading
 import time
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import msgpack
 
@@ -28,7 +28,7 @@ from utils.constants import (
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
-from utils.types import DirData, Message, TransferProgress, UserSettings, HeaderCode, ItemSearchResult,TransferStatus, JournalEntry
+from utils.types import DirData, FileMetaData, Message, TransferProgress, UserSettings, HeaderCode, ItemSearchResult,TransferStatus, JournalEntry
 
 
 
@@ -63,6 +63,14 @@ class ClientCore:
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
         self.transfer_progress: dict[str, TransferProgress] = {}  # Maps transfer ID -> TransferProgress
         self.pause_events: dict[str, threading.Event] = {}  # Maps transfer ID -> threading.Event for pausing/resuming transfers
+
+        # Consent policy for inbound direct transfers (4.7): return True to accept.
+        # Phase 4 defaults to auto-accept (headless tests); Phase 5 assigns a
+        # callback that pops an accept/reject dialog. Kept as a plain callable so
+        # core stays Qt-free (same seam idea as notify()).
+        self.auto_accept_transfers: bool = True
+        self.on_direct_transfer_request: Optional[Callable[[FileMetaData], bool]] = None
+
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
         self.journal: dict[str,JournalEntry] = self._load_journal()
@@ -697,6 +705,20 @@ class ClientCore:
         resumable = (TransferStatus.DOWNLOADING.value, TransferStatus.PAUSED.value)
         with self.journal_lock:
             return [dict(e) for e in self.journal.values() if e["status"] in resumable]
+
+    def should_accept_transfer(self, metadata: FileMetaData) -> bool:
+        """Consent decision for an inbound direct transfer (4.7.1).
+
+        Uses on_direct_transfer_request if set (Phase 5 dialog), else falls back
+        to the auto_accept_transfers flag (Phase 4 headless default). A broken
+        consent callback must not crash the listener thread — it rejects."""
+        if self.on_direct_transfer_request is not None:
+            try:
+                return bool(self.on_direct_transfer_request(metadata))
+            except Exception as e:
+                logger.error(f"Direct-transfer consent callback failed: {e}; rejecting.")
+                return False
+        return self.auto_accept_transfers
 
             
 
