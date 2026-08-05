@@ -16,7 +16,7 @@ from utils.constants import (
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.helpers import get_file_hash, get_files_in_dir, get_unique_filename
 from utils.protocol import receive_message, send_msgpack, send_text,send_error
-from utils.types import DirData, FileRequest, HeaderCode
+from utils.types import DirData, FileRequest, HeaderCode, TransferStatus
 
 #Import only for type hints: a runtime import of client.core would create a
 #circular dependency once ClientCore instantiates PeerListener -> transfers.
@@ -44,10 +44,12 @@ def download_file(
     land. Folder downloads pass the file's share-relative path so the source
     tree is mirrored; a single-file download leaves it None and the file lands
     flat under its own name."""
-
+    transfer_key = f"{owner_name}:{remote_file_path}"
+    core.start_transfer(transfer_key,total = filesize,received = resume_offset)
     owner_ip = core.request_peer_ip(owner_name)
     if not owner_ip:
         logger.error(f"Failed to get IP for owner {owner_name}")
+        core.set_transfer_status(transfer_key, TransferStatus.FAILED)
         return False
 
     data_listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -109,11 +111,13 @@ def download_file(
                         raise OSError("Connection closed by the sender before all data was received.")
                     f.write(chunk)
                     bytes_received += len(chunk)
+                    core.update_transfer(transfer_key, received=resume_offset + bytes_received)
                     logger.debug(f"Received {bytes_received}/{bytes_to_receive} bytes")
 
             actual_hash = get_file_hash(str(temp_path))
             if expected_hash and actual_hash != expected_hash:
                 logger.error(f"Hash mismatch for {temp_path}. Expected: {expected_hash}, Actual: {actual_hash}")
+                core.set_transfer_status(transfer_key, TransferStatus.FAILED)
                 return False
 
             # Mirror the source structure under the downloads folder, creating
@@ -122,6 +126,7 @@ def download_file(
             final_target.parent.mkdir(parents=True, exist_ok=True)
             final_dest = get_unique_filename(final_target)
             os.replace(temp_path, final_dest)
+            core.set_transfer_status(transfer_key, TransferStatus.COMPLETED)
             logger.info(f"File {remote_file_path} downloaded successfully to {final_dest}")
             return True
         finally:
@@ -129,7 +134,9 @@ def download_file(
     
     except (OSError,RequestException) as e:
         logger.error(f"Failed to connect to {owner_ip}:{CLIENT_RECV_PORT} - {e}")
+        core.set_transfer_status(transfer_key, TransferStatus.FAILED)
         return False
+    
     finally:
         control_sock.close()
         data_listen_sock.close()
