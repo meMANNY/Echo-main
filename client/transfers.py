@@ -32,6 +32,12 @@ def _transfer_key(owner_name: str, remote_file_path: str) -> str:
     return f"{owner_name}:{remote_file_path}"
 
 
+def _temp_path_for(owner_name: str, remote_file_path: str) -> Path:
+    """The partial-download file for a transfer. MUST match what download_file
+    writes to, so resume can measure how much was already received."""
+    return TEMP_FOLDER_PATH / owner_name / (remote_file_path + ".tmp")
+
+
 def download_file(
         core: "ClientCore",
         owner_name: str,
@@ -81,7 +87,7 @@ def download_file(
     # masquerading as complete in Downloads — the temp file IS the resume state.
     # Namespace it by owner + share-relative path so two files that share a
     # basename (a/readme.txt vs b/readme.txt) never collide in temp.
-    temp_path = TEMP_FOLDER_PATH / owner_name / (remote_file_path + ".tmp")
+    temp_path = _temp_path_for(owner_name, remote_file_path)
     temp_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "ab" if resume_offset > 0 else "wb" #append when resuming, else overwrite
 
@@ -128,6 +134,10 @@ def download_file(
             actual_hash = get_file_hash(str(temp_path))
             if expected_hash and actual_hash != expected_hash:
                 logger.error(f"Hash mismatch for {temp_path}. Expected: {expected_hash}, Actual: {actual_hash}")
+                # The reassembled file is proven bad — discard the partial so a
+                # later resume can't append to it and instead starts from zero
+                # (this is how the "source changed between pause/resume" edge heals).
+                temp_path.unlink(missing_ok=True)
                 core.set_transfer_status(transfer_key, TransferStatus.FAILED)
                 return False
 
@@ -247,6 +257,53 @@ def download_folder(
             overall_success = False
 
     return overall_success
+
+
+def resume_download(
+        core: "ClientCore",
+        owner_name: str,
+        file_item: DirData,
+        dest_subpath: Optional[str] = None,
+) -> bool:
+    """Resume a paused/interrupted download by measuring the partial temp file
+    and re-issuing the request from that offset. Pass the same file_item and
+    dest_subpath the original download used."""
+
+    remote_file_path = file_item["path"]
+    filesize = file_item["size"]
+    expected_hash = file_item.get("hash")
+
+    temp_path = _temp_path_for(owner_name, remote_file_path)
+    resume_offset = temp_path.stat().st_size if temp_path.exists() else 0
+
+    # The temp file IS the resume state: its size == bytes already confirmed.
+    # If it's somehow larger than the source (source shrank / corruption), the
+    # partial can't be trusted — discard it and start fresh.
+    if resume_offset > filesize:
+        logger.warning(
+            f"Partial for {remote_file_path} ({resume_offset}B) exceeds source size "
+            f"({filesize}B); discarding and restarting from zero."
+        )
+        temp_path.unlink(missing_ok=True)
+        resume_offset = 0
+
+    if resume_offset == 0:
+        logger.info(f"No usable partial for {remote_file_path}; downloading from the start.")
+    else:
+        logger.info(f"Resuming {remote_file_path} from offset {resume_offset}/{filesize} bytes.")
+
+    # download_file does the rest: opens the temp in append mode, sends
+    # resume_offset in the FILE_REQUEST (sender seeks to it), verifies the hash
+    # on the FULL reassembled file, then moves it into Downloads.
+    return download_file(
+        core=core,
+        owner_name=owner_name,
+        remote_file_path=remote_file_path,
+        filesize=filesize,
+        resume_offset=resume_offset,
+        expected_hash=expected_hash,
+        dest_subpath=dest_subpath,
+    )
 
 
 
