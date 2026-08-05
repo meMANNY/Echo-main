@@ -104,6 +104,9 @@ def download_file(
         try:
             with open(temp_path,mode) as f:
                 while bytes_received < bytes_to_receive:
+                    if core.is_transfer_paused(transfer_key):
+                        logger.info(f"Transfer {transfer_key} paused. Waiting to resume...")
+                        return False  # Exit the function to allow for pausing; the transfer can be resumed later
                     chunk_size = min(FILE_BUFFER_LEN, bytes_to_receive - bytes_received)
                     chunk = data_sock.recv(chunk_size)
                     
