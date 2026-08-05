@@ -22,7 +22,8 @@ from utils.constants import (
     HEARTBEAT_TIMER,
     ONLINE_TIMEOUT,
     MESSAGE_MAX_LEN,
-    CLIENT_RECV_PORT
+    CLIENT_RECV_PORT,
+    TRANSFER_JOURNAL_PATH,
 )
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
@@ -637,8 +638,61 @@ class ClientCore:
         with self.transfer_lock:
             event = self.pause_events.get(key)
             return event is not None and not event.is_set()
+
     
-        
+    def _load_journal(self) -> dict[str, "JournalEntry"]:
+        if not TRANSFER_JOURNAL_PATH.exists():
+            return {}
+        try:
+            with open(TRANSFER_JOURNAL_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"Failed to load transfer journal: {e}. Starting with an empty journal.")
+            return {}
+
+    def _save_journal(self) -> None:
+        """Atomically rewrite the journal. Caller MUST hold journal_lock."""
+        tmp = TRANSFER_JOURNAL_PATH.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.journal, f, indent=2)
+            tmp.replace(TRANSFER_JOURNAL_PATH)     # atomic on the same filesystem
+        except OSError as e:
+            logger.error(f"Failed to persist transfer journal: {e}")
+
+    def journal_start(self, key: str, uname: str, filepath: str, total: int,
+                    received: int, expected_hash: Optional[str],
+                    dest_subpath: Optional[str]) -> None:
+        """Record a download as in-flight so it survives a crash/restart."""
+        with self.journal_lock:
+            self.journal[key] = {
+                "uname": uname, "filepath": filepath, "total": total,
+                "received": received, "status": TransferStatus.DOWNLOADING.value,
+                "hash": expected_hash, "dest_subpath": dest_subpath,
+            }
+            self._save_journal()
+
+    def journal_update_status(self, key: str, status: TransferStatus) -> None:
+        with self.journal_lock:
+            entry = self.journal.get(key)
+            if entry is None:
+                return
+            entry["status"] = status.value
+            self._save_journal()
+
+    def journal_remove(self, key: str) -> None:
+        with self.journal_lock:
+            if self.journal.pop(key, None) is not None:
+                self._save_journal()
+
+    def get_resumable_transfers(self) -> list["JournalEntry"]:
+        """Entries left DOWNLOADING (hard-killed) or PAUSED by a previous session."""
+        resumable = (TransferStatus.DOWNLOADING.value, TransferStatus.PAUSED.value)
+        with self.journal_lock:
+            return [dict(e) for e in self.journal.values() if e["status"] in resumable]
+
+            
 
 
 
