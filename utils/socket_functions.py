@@ -45,18 +45,17 @@ def update_share_data(share_folder_path: Path, client_send_socket: socket.socket
     # {: <15}: means format the following value to be left aligned and padded with spaces to a total width of 15 characters.
 
 
-    try:
-        share_dict = path_to_dict(share_folder_path, str(share_folder_path))
-        children = share_dict['children']
+    
+    share_dict = path_to_dict(share_folder_path, str(share_folder_path))
+    children = share_dict['children']
     #Use send_msgpack for convenience wrapper
-        send_msgpack(client_send_socket,HeaderCode.SHARE_DATA, children)
-        msg = receive_message(client_send_socket)
+    send_msgpack(client_send_socket,HeaderCode.SHARE_DATA, children)
+    msg = receive_message(client_send_socket)
 
-        if msg["type"] != HeaderCode.SHARE_DATA:
-            logging.error("Invalid Message type from the server")
+    if msg["type"] != HeaderCode.SHARE_DATA:
+        logging.error("Invalid Message type from the server")
 
-    except RequestException as e:
-        logging.error(f"Failed to update share data: {e.msg}")
+    
 
     
 def request_ip(username: str, client_send_socket: socket.socket) -> str | None:

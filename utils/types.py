@@ -1,6 +1,6 @@
 from enum import Enum
 
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple, Optional, TypedDict
 
 
 class HeaderCode(Enum):
@@ -40,6 +40,9 @@ class TransferProgress(TypedDict):
     status: TransferStatus
     progress: int
     percent_progress: float
+    total: int
+    speed_bps: float
+    eta_seconds: Optional[float]
 
 class ProgressBarData(TypedDict):
     current: int
@@ -94,6 +97,15 @@ class UserSettings(TypedDict):
 class Message(TypedDict):
     sender: str
     content: str
+
+class JournalEntry(TypedDict):
+    uname: str
+    filepath: str
+    total: int
+    received: int
+    status: int
+    hash: Optional[str] #expected hash , for end verification on resume
+    dest_subpath: Optional[str] #folder-mirror destination
     
 
     

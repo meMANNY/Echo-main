@@ -9,3 +9,7 @@ Pipfile.lock
 .Drizzle/
 .Echo/
 .venv/
+
+test_client.py
+test_server.py
+verify_phase3.py

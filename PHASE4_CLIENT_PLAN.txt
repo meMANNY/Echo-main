@@ -1,0 +1,834 @@
+================================================================================
+              PHASE 4 — CLIENT CORE LOGIC: DETAILED PLAN
+================================================================================
+                         Generated: 2026-06-13
+================================================================================
+
+CONTEXT
+-------
+Phase 3 gave you a working, verified server: registration, IP<->uname
+lookup, share-folder indexing (TinyDB), browse, search, heartbeat, and
+hash updates — all spoken over the Phase 2 wire protocol (protocol.py).
+
+Phase 4 is where the OTHER side of every one of those conversations gets
+built: the CLIENT. By the end of Phase 4 you should be able to run two
+client processes (no GUI yet) that:
+  - connect to the server and register a username,
+  - publish their share folder,
+  - browse and search each other's files,
+  - chat peer-to-peer,
+  - and transfer files directly, peer-to-peer, with pause/resume.
+
+Phase 4 mirrors sections 4.1-4.7 of DETAILED_PROGRESS_AND_TASKS.txt:
+  4.1 Client Foundation   — entry point, server connection, registration,
+                            app dirs, settings load/save
+  4.2 P2P Messaging       — direct peer-to-peer chat
+  4.3 File Browsing       — request + display another user's share tree
+  4.4 File Search          — network-wide search, navigate to owner
+  4.5 File Download        — single file + recursive folder, hash verify
+  4.6 Advanced Download    — pause, resume, persist progress, unique names
+  4.7 Direct Transfer      — push a file to a specific user, with consent
+
+CRITICAL ARCHITECTURAL FACT — TWO ROLES IN ONE PROCESS
+------------------------------------------------------
+This is the single most important thing to internalize before you write
+a line of Phase 4. Unlike the server (which only ever RESPONDS), every
+client is simultaneously:
+
+  (a) a CLIENT to the server — one persistent outbound TCP socket it
+      opens at startup and reuses for the whole session (registration,
+      browse, search, heartbeat, share-data, hash updates). This is the
+      socket your Phase-3 socket_functions.py helpers already drive.
+
+  (b) a SERVER to its peers — a listening socket on CLIENT_RECV_PORT
+      (4321) that accepts INBOUND connections from other clients for
+      chat messages, file requests, and direct transfers. The server is
+      NOT involved in any of this; peers talk straight to each other.
+
+So a client runs a listen/accept loop of its own (a miniature version of
+your Phase 3 server) AND holds a long-lived connection to the central
+server. Two sockets, two directions, living in one process. Most of the
+Phase 4 bugs you'll hit come from confusing the two. Keep them mentally
+(and in code) separate: `server_socket` (to the server) vs.
+`self_recv_socket` (the peer listener).
+
+
+WHY THIS PHASE MATTERS
+----------------------
+1. It's where the peer-to-peer model finally pays off. The server was
+   just a directory; the actual value of Echo — moving files and chat
+   between machines with no middleman — lives here.
+
+2. It's your first taste of CONCURRENCY that you can't dodge. The client
+   must listen for peers AND react to user actions AND send heartbeats,
+   all at once. Phase 3 got away with a single select() thread because
+   the server only reacts. The client is driven from multiple directions,
+   so you'll use background threads. (Phase 5 wraps these in QThreads;
+   Phase 4 builds the plumbing with plain threading so you can test
+   headless.)
+
+3. It forces you to design a clean boundary between "transport logic"
+   (sockets, framing, protocol) and "application logic" (what to do with
+   a received file or message). Phase 5's GUI will sit on top of exactly
+   this boundary, so getting it right now saves you a rewrite later.
+
+
+================================================================================
+PHASE 4.1 — CLIENT FOUNDATION
+================================================================================
+
+GOAL: A headless client module that connects to the server, registers a
+username, sets up its directories and settings, and can be driven from a
+tiny CLI/REPL for testing — no GUI.
+
+
+--------------------------------------------------------------------------------
+STEP 4.1.1 — Decide the file layout
+--------------------------------------------------------------------------------
+
+You already have client/client.py and client/p2p.py (prototype code).
+Don't graft onto the prototype — it has the raw-string protocol and
+hardcoded IPs flagged in DETAILED_PROGRESS_AND_TASKS.txt. Start clean.
+
+Recommended layout (mirrors how you split the server, per Phase 3 Q1):
+
+  client/
+    __init__.py
+    core.py          NEW — ClientCore class: owns both sockets, the
+                     connection state, and the high-level operations
+                     (register, browse, search, send_message, download).
+    peer_listener.py NEW — the inbound peer server: listen on
+                     CLIENT_RECV_PORT, accept, dispatch peer requests
+                     (MESSAGE, FILE_REQUEST, DIRECT_TRANSFER_REQUEST).
+    transfers.py     NEW — file send/receive helpers (chunked streaming,
+                     hashing, resume offsets). Pure transport, no UI.
+    app.py           NEW (Phase 5 entry point; in Phase 4 a thin CLI
+                     driver is enough).
+
+Keep client/client.py and client/p2p.py for now as reference, but do not
+import them. Delete once Phase 4 is verified (same discipline as the
+server's legacy block).
+
+Why a ClientCore CLASS (not module-level globals like the server)?
+  - The server is a singleton process; module globals are fine there.
+  - A client has instance state (my uname, my settings, my server socket,
+    my peer list) that Phase 5 will want to instantiate and connect Qt
+    signals to. A class gives you one object to hand the GUI. It also
+    lets you run TWO ClientCore instances in one test process if you ever
+    want to (you won't need to, but the cleanliness matters).
+
+
+--------------------------------------------------------------------------------
+STEP 4.1.2 — Application directories and settings
+--------------------------------------------------------------------------------
+
+On first run, ensure these exist (constants.py already defines the paths):
+  ~/.Echo/                      (root)
+  ~/.Echo/share/                SHARE_FOLDER_PATH   — what you publish
+  ~/.Echo/db/                   holds settings.json
+  ~/.Echo/tmp/                  TEMP_FOLDER_PATH     — partial downloads
+  ~/.Echo/compressed/           SHARE_COMPRESSED_PATH
+  ~/.Echo/direct/               DIRECT_TEMP_FOLDER_PATH — partial direct xfers
+  ~/Downloads/                  RECV_FOLDER_PATH (default; user-overridable)
+
+mkdir(parents=True, exist_ok=True) each — same idempotent pattern as the
+server bootstrap. Do this in ClientCore.__init__ BEFORE anything touches
+a path, or you'll get FileNotFoundError on first run.
+
+SETTINGS (UserSettings TypedDict already exists in types.py):
+  {
+    "uname": "alice",
+    "share_folder_path": ".../.Echo/share",
+    "server_ip": "192.168.29.238",
+    "downloads_folder_path": ".../Downloads",
+    "show_notifications": true
+  }
+
+  load: read USER_SETTINGS_PATH (~/.Echo/db/settings.json) as JSON. If it
+        doesn't exist or won't parse, fall back to defaults built from
+        constants.py and treat the client as "first run" (it must prompt
+        for a username + server IP). Drizzle's app.py does exactly this
+        try/except-to-defaults dance — see Drizzle/src/client/app.py:53-75.
+  save: write the dict back as JSON whenever settings change (and on a
+        successful registration, to remember the username/server).
+
+Decision: store settings as plain JSON (not TinyDB). It's a flat config,
+human-editable, and matches Drizzle. TinyDB is for the server's share
+index, not client config.
+
+
+--------------------------------------------------------------------------------
+STEP 4.1.3 — Connect to the server and register
+--------------------------------------------------------------------------------
+
+This is the client's "hello". Sequence (all over the ONE persistent
+server socket):
+
+  1. Create a TCP socket. Optionally bind the local end to CLIENT_SEND_PORT
+     (5678) — Drizzle does, mostly cosmetic; the OS will assign one
+     otherwise. TCP_NODELAY is worth setting (small request/response).
+
+  2. connect((server_ip, SERVER_RECV_PORT)). Wrap in try/except: a
+     refused connection means "server down / wrong IP" and must surface
+     to the user as a clear message, NOT a stack trace.
+
+  3. Register: send_text(server_socket, HeaderCode.NEW_CONNECTION, uname).
+     Then receive_message(). Three outcomes (these mirror your server's
+     register_user exactly):
+       - reply type NEW_CONNECTION  => success, you're registered.
+       - RequestException USER_EXISTS => username taken by another IP;
+         prompt the user to pick a different name and retry.
+       - RequestException BAD_REQUEST => you (same IP) are already
+         registered; treat as already-connected (benign on retry).
+
+  4. On success: persist uname + server_ip to settings, mark
+     self.connected = True.
+
+NOTE on receive_message raising: your Phase 2 receive_message RAISES
+RequestException on an "e" reply. So registration's error handling is a
+try/except around receive_message, not an if on the reply type. This is
+the SAME pattern your socket_functions.request_ip/request_uname already
+use — reuse that shape.
+
+IMPORTANT — the persistent server socket is single-threaded by contract
+(Phase 2 decision D4). Once you add a background heartbeat thread (4.1.5)
+AND user-driven browse/search on the same socket, two threads will want
+to read/write it. You MUST serialize access with a threading.Lock around
+every request/response pair on the server socket. Forget this and you'll
+get interleaved frames and corrupt reads that are maddening to debug.
+Decide the lock now; thread it through every server call.
+
+
+--------------------------------------------------------------------------------
+STEP 4.1.4 — Publish share data
+--------------------------------------------------------------------------------
+
+You already wrote utils/socket_functions.update_share_data(). After a
+successful registration, call it once to publish the initial share tree:
+
+  update_share_data(SHARE_FOLDER_PATH, server_socket)
+
+It walks SHARE_FOLDER_PATH via helpers.path_to_dict (now Windows-safe
+after your Phase 3 path fix), msgpacks the children, sends SHARE_DATA,
+and reads the ack. Re-call it whenever the share folder changes (Phase 5
+will wire this to a "rescan" button; Phase 4 can call it manually).
+
+GOTCHA you already half-fixed: path_to_dict emits paths relative to the
+share folder with forward slashes. The server's validate_share_tree
+rejects absolute paths and "..". If you ever publish a folder OUTSIDE
+SHARE_FOLDER_PATH you'll trip relative_to() — keep everything under the
+share root (use symlinks via helpers.import_file_to_share to "add"
+external files, which is exactly what that helper is for).
+
+
+--------------------------------------------------------------------------------
+STEP 4.1.5 — The heartbeat thread
+--------------------------------------------------------------------------------
+
+The server's HEARTBEAT_REQUEST handler returns {uname: last_seen} for all
+OTHER users. The client must poll it every HEARTBEAT_TIMER seconds (5s,
+constants.py) to know who is online.
+
+  - Spawn a daemon thread that loops: acquire server-socket lock,
+    send_text(HEARTBEAT_REQUEST, "1"), receive_message, release lock,
+    sleep HEARTBEAT_TIMER.
+  - Parse the returned dict. A peer is "online" if now - last_seen <
+    ONLINE_TIMEOUT (10s). Store the online set on the ClientCore; Phase 5
+    reads it to render the user list.
+  - daemon=True so it dies with the process. Wrap the body in try/except
+    so a transient server hiccup logs and retries rather than killing the
+    thread (a dead heartbeat thread = permanently "everyone offline").
+
+This is your first concurrency. The lock from 4.1.3 is what makes it safe
+to share the server socket between this thread and user-driven calls.
+
+
+================================================================================
+PHASE 4.2 — P2P MESSAGING
+================================================================================
+
+GOAL: Two clients exchange chat messages directly, with no server in the
+middle beyond the initial IP lookup.
+
+
+--------------------------------------------------------------------------------
+STEP 4.2.1 — The peer listener (inbound half)
+--------------------------------------------------------------------------------
+
+Stand up the client's "server" side: peer_listener.py.
+
+  - Create a TCP socket, bind to ("", CLIENT_RECV_PORT) (4321), listen().
+    Bind to "" / 0.0.0.0 (not get_self_ip()) so it accepts from any LAN
+    peer. (Recall your server bound to a specific IP and couldn't be
+    reached on 127.0.0.1 — don't repeat that here; the peer listener
+    should accept on all interfaces.)
+  - Run an accept loop in a daemon thread. For each accepted peer
+    connection, EITHER handle it inline (peer connections are short-lived
+    and one-shot) or hand it to a short-lived worker thread. For Phase 4,
+    one-connection-at-a-time inline handling is fine; revisit if a big
+    file transfer blocks an incoming chat (it can — note it).
+  - Each accepted connection: receive_message(peer_sock), dispatch by
+    type (MESSAGE / FILE_REQUEST / DIRECT_TRANSFER_REQUEST), respond,
+    close. Per Phase 2 decision D5, peer sockets are short-lived: one
+    connect per message/file/chat.
+
+
+--------------------------------------------------------------------------------
+STEP 4.2.2 — Sending a chat message (outbound half)
+--------------------------------------------------------------------------------
+
+To message peer "bob":
+  1. Resolve bob's IP: request_ip("bob", server_socket) — the helper you
+     already wrote. Returns None if bob is offline/unknown; surface that.
+  2. Open a FRESH short-lived TCP socket to (bob_ip, CLIENT_RECV_PORT).
+  3. send_text(peer_sock, HeaderCode.MESSAGE, text). Enforce
+     MESSAGE_MAX_LEN (256 bytes, constants.py) BEFORE sending — reject or
+     truncate longer messages client-side.
+  4. Close. No ack required for chat (fire-and-forget), but be ready for
+     an "e" reply if the peer rejects (e.g. unknown sender).
+
+On the receiving side (in the listener's dispatch): MESSAGE => decode
+text, attach the sender (derive sender uname via request_uname on the
+peer's IP), store to history, fire a notification.
+
+
+--------------------------------------------------------------------------------
+STEP 4.2.3 — Message history
+--------------------------------------------------------------------------------
+
+Keep an in-memory dict {peer_uname: list[Message]} on the ClientCore
+(Message TypedDict already exists: {sender, content}). Append on both
+send and receive. Persisting chat history to disk is OPTIONAL for Phase 4
+(Drizzle keeps it in-memory per session) — note it as a Phase 7 nicety,
+don't build it now. Resist scope creep.
+
+
+--------------------------------------------------------------------------------
+STEP 4.2.4 — Notifications
+--------------------------------------------------------------------------------
+
+On an inbound MESSAGE, if settings.show_notifications is true, fire a
+desktop notification (notify-py is in the Pipfile). Keep this behind a
+thin wrapper (notify(title, body)) so Phase 5 can route it through the
+GUI instead. In headless Phase 4, the wrapper can just log. Don't let a
+notification failure crash the listener — wrap in try/except.
+
+
+================================================================================
+PHASE 4.3 — FILE BROWSING
+================================================================================
+
+GOAL: Fetch and display another user's shared file tree.
+
+
+--------------------------------------------------------------------------------
+STEP 4.3.1 — Request a peer's share tree
+--------------------------------------------------------------------------------
+
+This one goes to the SERVER, not the peer (the server holds the index):
+  1. send_text(server_socket, HeaderCode.FILE_BROWSE, target_uname).
+  2. receive_message(). On success, type FILE_BROWSE, body is msgpack of
+     the user's record { "uname":..., "share":[DirData,...] } (matches
+     what your server's FILE_BROWSE handler sends, including the
+     graceful-empty {"uname":..., "share":[]} case for a registered user
+     with no uploads).
+  3. NOT_FOUND (RequestException) => unknown user; surface it.
+
+Wrap as ClientCore.browse(uname) -> list[DirData]. All under the
+server-socket lock.
+
+
+--------------------------------------------------------------------------------
+STEP 4.3.2 — Represent and walk the tree
+--------------------------------------------------------------------------------
+
+The returned share is a list of DirData (recursive: files have size,
+directories have children). For Phase 4 (headless), a pretty-printer is
+enough — helpers.display_share_dict already does an indented dump. Use it
+to eyeball that browse round-trips correctly.
+
+Phase 5 turns this same DirData tree into a QTreeView; design browse() to
+return the raw tree, not a formatted string, so the GUI can consume it.
+(Same principle as the server's "return raw bytes, let the caller
+decode" — keep transport and presentation separate.)
+
+
+--------------------------------------------------------------------------------
+STEP 4.3.3 — File metadata
+--------------------------------------------------------------------------------
+
+Each DirData carries name, path, type, size, hash, compression. For
+display, convert size with helpers.convert_size (human-readable). hash is
+often None until someone downloads (lazy hashing — see 4.5.4). Show
+"unverified" rather than blank when hash is None.
+
+
+================================================================================
+PHASE 4.4 — FILE SEARCH
+================================================================================
+
+GOAL: Network-wide filename search; jump from a result to its owner.
+
+
+--------------------------------------------------------------------------------
+STEP 4.4.1 — Issue the search
+--------------------------------------------------------------------------------
+
+  1. send_text(server_socket, HeaderCode.FILE_SEARCH, query). Lowercase
+     the query client-side (the server lowercases too, but be consistent).
+  2. receive_message() => msgpack list[ItemSearchResult], each
+     {owner, data:DirData}. Server already skips your own files and runs
+     fuzzy + regex matching (helpers.item_search).
+  3. Empty list is a valid "no matches", NOT an error — render "no
+     results", don't raise.
+
+KNOWN SHARP EDGE (carried from Phase 3): the server's item_search calls
+re.search(query, ...). A query containing regex metacharacters ( ( [ * )
+makes the SERVER raise re.error, which its catch-all now turns into a
+generic BAD_REQUEST back to you. Client-side, either re.escape the query
+before sending, or just handle the BAD_REQUEST gracefully ("invalid
+search"). Escaping client-side is the cleaner fix and belongs here.
+
+
+--------------------------------------------------------------------------------
+STEP 4.4.2 — Navigate to owner
+--------------------------------------------------------------------------------
+
+Each result has an owner uname. "Go to owner" = browse(owner) (4.3) and
+highlight the matched path. Trivial once browse exists; it's mostly a
+Phase 5 UI affordance. In Phase 4, just confirm result.owner + result.
+data.path are enough to locate the file for a subsequent download.
+
+
+================================================================================
+PHASE 4.5 — FILE DOWNLOAD
+================================================================================
+
+GOAL: Download a single file (and recursively, a folder) from a peer,
+P2P, and verify integrity with SHA-1.
+
+This is the heart of Phase 4 and the most error-prone. Build it slowly.
+
+
+--------------------------------------------------------------------------------
+STEP 4.5.1 — The download handshake (FILE_REQUEST)
+--------------------------------------------------------------------------------
+
+Downloads are PEER-TO-PEER. The server is not involved beyond having told
+you the owner's IP (via request_ip).
+
+Requester side:
+  1. request_ip(owner) -> owner_ip.
+  2. Open a short-lived socket to (owner_ip, CLIENT_RECV_PORT).
+  3. send_msgpack(peer_sock, HeaderCode.FILE_REQUEST, FileRequest) where
+     FileRequest (TypedDict, already defined) =
+       { filepath, port, request_hash, resume_offset }
+     - filepath: the path within the owner's share (from the DirData).
+     - port: a port YOU open to receive the raw stream on (see note).
+     - request_hash: True if you want the sender to compute+send the hash.
+     - resume_offset: bytes you already have (0 for a fresh download;
+       see 4.6 for resume).
+
+  IMPORTANT — FILE_REQUEST does NOT follow the "msgpack body in the
+  response" rule. Per the protocol table, the sender opens a NEW socket
+  back to the requester on `port` and streams raw file bytes. So the
+  requester must ALSO be listening on `port` for the incoming stream.
+  This two-socket dance (control request on 4321, data stream on a
+  requester-chosen port) is the bit most likely to confuse you. Re-read.
+
+  (Simpler alternative worth considering: stream the bytes back over the
+  SAME peer socket the FILE_REQUEST arrived on, framed with a length
+  header, instead of opening a second port. It's less faithful to
+  Drizzle but much easier to get right and to firewall. Decide in Q
+  below. If you choose same-socket, you don't need `port` at all.)
+
+Sender side (in the peer listener's dispatch): on FILE_REQUEST, validate
+the path is within your share, open the file, seek to resume_offset,
+stream FILE_BUFFER_LEN (16KB) chunks. If request_hash, compute SHA-1
+(helpers.get_file_hash) and send it (and UPDATE_HASH to the server so
+future downloaders skip recompute — see 4.5.4).
+
+
+--------------------------------------------------------------------------------
+STEP 4.5.2 — Streaming and reassembly
+--------------------------------------------------------------------------------
+
+  - Sender: read the file in FILE_BUFFER_LEN chunks, sendall each. Loop
+    until EOF. For a known size, the receiver knows when to stop.
+  - Receiver: recvall the exact byte count (you know the size from the
+    DirData you browsed, minus resume_offset). Write to a PARTIAL file in
+    TEMP_FOLDER_PATH first, never directly to the final location. Only on
+    a complete, verified download do you move it to the downloads folder.
+  - Use helpers.get_unique_filename at the final move so a second
+    download of "report.pdf" becomes "report_1.pdf" instead of
+    clobbering.
+
+Why temp-first: a download interrupted halfway must not leave a corrupt
+file masquerading as complete in the user's Downloads. The temp file IS
+your resume state (4.6).
+
+
+--------------------------------------------------------------------------------
+STEP 4.5.3 — Folder (recursive) download
+--------------------------------------------------------------------------------
+
+A directory DirData has children. Folder download = walk the tree
+(helpers.get_files_in_dir flattens it to a file list), download each file
+into the mirrored subfolder structure under the destination. Track
+aggregate progress (total bytes across all files vs. received). Keep the
+directory structure by honoring each file's relative `path`.
+
+
+--------------------------------------------------------------------------------
+STEP 4.5.4 — Hash verification + lazy hashing
+--------------------------------------------------------------------------------
+
+  - After a file download completes, compute SHA-1 of the received file
+    (helpers.get_file_hash) and compare to the hash the sender provided.
+    Mismatch => discard the temp file, mark FAILED, optionally retry.
+  - LAZY HASHING is why UPDATE_HASH exists. Clients publish share data
+    with hash=None (hashing a whole share folder up front is slow). The
+    FIRST time someone downloads a file with request_hash=True, the
+    sender computes the hash, returns it, AND sends UPDATE_HASH to the
+    server so the server's record is filled in. Future browsers see the
+    hash without anyone recomputing. You built the server side already;
+    this is the client side that drives it.
+
+
+================================================================================
+PHASE 4.6 — ADVANCED DOWNLOAD FEATURES
+================================================================================
+
+GOAL: Pause, resume, persist progress, never clobber.
+
+
+--------------------------------------------------------------------------------
+STEP 4.6.1 — Progress model
+--------------------------------------------------------------------------------
+
+TransferProgress / TransferStatus already exist in types.py
+(NEVER_STARTED, DOWNLOADING, PAUSED, COMPLETED, FAILED). Track per active
+download: status, bytes received, total bytes, percent. This is the
+struct Phase 5's progress bar binds to.
+
+
+--------------------------------------------------------------------------------
+STEP 4.6.2 — Pause
+--------------------------------------------------------------------------------
+
+Pause = stop reading from the data socket and set status=PAUSED, leaving
+the partial file in TEMP_FOLDER_PATH intact. The clean way: the download
+loop checks a per-transfer threading.Event each chunk; "pause" clears it,
+the loop breaks out and records bytes-so-far. Don't try to pause
+mid-chunk; chunk granularity (16KB) is fine.
+
+
+--------------------------------------------------------------------------------
+STEP 4.6.3 — Resume
+--------------------------------------------------------------------------------
+
+Resume = re-issue FILE_REQUEST with resume_offset = size of the partial
+temp file. The sender seeks to that offset and streams the rest; the
+receiver APPENDS to the existing temp file. This is the whole reason
+resume_offset is in the FileRequest TypedDict. Verify the hash only after
+the FULL file is reassembled, not per-resume.
+
+Edge case: the source file changed between pause and resume (size/hash
+differ). Detect via the hash mismatch at the end and restart that file
+from zero. Note it; don't over-engineer mid-stream change detection.
+
+
+--------------------------------------------------------------------------------
+STEP 4.6.4 — Persist progress across restarts
+--------------------------------------------------------------------------------
+
+Write a small progress journal (JSON) under ~/.Echo/db/ mapping
+temp-file -> {source uname, filepath, total, received, status}. On
+startup, offer to resume any DOWNLOADING/PAUSED entries. Drizzle persists
+this; for Phase 4 a single JSON file rewritten on each pause/complete is
+enough. The temp file + this journal entry together fully describe a
+resumable download.
+
+
+================================================================================
+PHASE 4.7 — DIRECT TRANSFER (PUSH)
+================================================================================
+
+GOAL: Send a file TO a specific user (the inverse of download — sender
+initiates), with the receiver consenting first.
+
+
+--------------------------------------------------------------------------------
+STEP 4.7.1 — The consent handshake (DIRECT_TRANSFER_REQUEST)
+--------------------------------------------------------------------------------
+
+  Sender:
+    1. request_ip(target) -> ip.
+    2. Open peer socket, send_msgpack(DIRECT_TRANSFER_REQUEST,
+       FileMetaData) = { path, size, hash, compression }.
+    3. Wait for the response:
+       - an ack (receiver accepted) => proceed to DIRECT_TRANSFER.
+       - an "e" RequestException (UNAUTHORIZED / rejected) => receiver
+         declined; stop, tell the user.
+
+  Receiver (listener dispatch): on DIRECT_TRANSFER_REQUEST, show an
+  accept/reject prompt (headless Phase 4: auto-accept or a CLI y/n; Phase
+  5: a dialog). On accept, reply with an ack and be ready to receive the
+  stream. On reject, send_error(UNAUTHORIZED).
+
+
+--------------------------------------------------------------------------------
+STEP 4.7.2 — The transfer (DIRECT_TRANSFER)
+--------------------------------------------------------------------------------
+
+Two-stage frame (per the protocol table): a metadata frame
+(msgpack FileMetaData) followed by the raw byte stream. Receiver writes
+to DIRECT_TEMP_FOLDER_PATH (separate temp area from pulls, so the two
+don't collide), verifies the hash from the metadata, then moves to the
+downloads folder with get_unique_filename. Reuse the streaming/verify
+code from 4.5 — direct transfer is "download, but the sender starts it."
+
+
+================================================================================
+IMPORTANT CONCEPTS TO LEARN IN THIS PHASE
+================================================================================
+
+  1. THE CLIENT-AS-SERVER PATTERN
+     Every P2P node is dual-role. The same machine runs an accept loop
+     for peers and holds a client connection to a coordinator. This is
+     how BitTorrent, IPFS, and every P2P system works. Echo is a tiny
+     version. The mental model: "server socket = I am a client; listen
+     socket = I am a server."
+
+  2. THREADS vs. THE SERVER'S SINGLE select() LOOP
+     Phase 3 avoided threads because the server only reacts to I/O. The
+     client is pushed from multiple sources (user, peers, heartbeat
+     timer), so you need concurrency. Learn: daemon threads, why the
+     server socket needs a Lock (shared mutable resource), and why the
+     peer listener can be lock-free (each peer connection is independent).
+
+  3. THREAD SAFETY & THE GIL
+     The GIL does NOT make your code thread-safe — it serializes
+     bytecode, not logical operations. Two threads doing send-then-recv
+     on one socket will still interleave at the syscall boundary. That's
+     why the server-socket Lock is mandatory. Understand the difference
+     between "atomic bytecode" and "atomic operation".
+
+  4. BLOCKING I/O IN A THREAD
+     The client uses blocking sockets in threads (simpler than the
+     server's non-blocking select). One blocked recv only blocks ITS
+     thread. This is the other valid concurrency model (thread-per-task
+     vs. event-loop). Know when each fits: event loop for many idle
+     connections (the server), threads for a few active transfers (the
+     client).
+
+  5. STREAMING LARGE FILES (BACKPRESSURE & CHUNKING)
+     You can't read a 2GB file into RAM. Chunked read/sendall (16KB)
+     bounds memory and lets TCP apply backpressure (sendall blocks when
+     the kernel buffer is full — that's the network throttling you, which
+     is correct). Understand why chunk size is a throughput/overhead
+     trade-off.
+
+  6. RESUMABLE TRANSFERS & IDEMPOTENCY
+     resume_offset + seek + append is the same technique HTTP Range
+     requests use. The invariant: temp-file-size == bytes-confirmed.
+     Anything that breaks that invariant (writing before confirming,
+     verifying too early) corrupts resume. Same "make illegal states
+     unrepresentable" discipline you used for the server's UserState.
+
+  7. INTEGRITY VERIFICATION (WHY SHA-1, WHY AT THE END)
+     A hash over the whole file catches truncation, corruption, and
+     source-changed-mid-transfer. It must be computed on the FULLY
+     reassembled file, which is why temp-first + verify + move is the
+     order. (SHA-1 is fine here — this is integrity, not security.)
+
+  8. SEPARATION OF TRANSPORT AND PRESENTATION
+     core.py returns raw data (DirData trees, byte counts, status
+     structs); it never formats for a screen. Phase 5 binds Qt widgets to
+     those structs. If you find yourself building HTML or print-strings
+     inside core.py, you're leaking presentation into transport — stop.
+
+  9. GRACEFUL DEGRADATION ON A FLAKY LAN
+     Peers vanish mid-transfer. Every peer operation must assume the
+     other side can disappear: timeouts on connect/recv, OSError ->
+     mark FAILED + clean partials, never a crash. This is the client-side
+     mirror of the server's disconnect handling you already built.
+
+
+================================================================================
+IMPROVEMENTS YOU CAN ADD BEYOND DRIZZLE
+================================================================================
+
+  A. SINGLE SERVER-SOCKET LOCK, DONE RIGHT
+     Wrap the server socket in a tiny class that owns the Lock and exposes
+     request(type, body) -> reply, so no caller can forget to lock. This
+     is the client-side analogue of the server's register_user/
+     unregister_user consolidation — make the unsafe thing impossible.
+
+  B. CONNECT TIMEOUTS EVERYWHERE
+     settimeout() on every peer socket. A peer that accepts but never
+     responds must not hang a transfer thread forever. Drizzle is sloppy
+     here; you can be better.
+
+  C. CONCURRENT DOWNLOADS
+     A download queue + a small thread pool, so two files download at
+     once without blocking the listener. Start with serial; add this once
+     single-file works.
+
+  D. SAME-SOCKET FILE STREAMING (vs. second data port)
+     Stream file bytes back over the FILE_REQUEST socket with a length
+     frame instead of opening a second port. Fewer firewall headaches,
+     simpler code. A real simplification over Drizzle (see Q3).
+
+  E. ATOMIC FINAL MOVE
+     Write to temp, fsync, then os.replace() to the final path (atomic on
+     the same filesystem). Guarantees a downloaded file is either fully
+     there or not there — never half.
+
+  F. RESCAN-ON-CHANGE
+     Watch SHARE_FOLDER_PATH (watchdog lib or a periodic rescan) and
+     auto-call update_share_data when files change. Phase 5 nicety; note
+     it.
+
+  G. TRANSFER RATE / ETA
+     Track bytes/sec with time.perf_counter() to show speed + ETA.
+     Cheap, satisfying, and feeds Phase 5's progress UI.
+
+Pick 2-3. (A) and (B) are the highest-value-for-effort — they prevent the
+two bug classes (interleaved server I/O, hung peers) you're most likely
+to hit. (D) materially simplifies 4.5 if you choose it early.
+
+
+================================================================================
+DECISIONS TO MAKE BEFORE STARTING PHASE 4
+================================================================================
+
+  Q1. CLASS OR MODULE GLOBALS?
+      Recommended: a ClientCore class. Instance state + a clean object to
+      hand Phase 5's GUI. (Server used globals because it's a singleton;
+      the client isn't.)
+
+  Q2. PLAIN threading OR jump straight to QThread?
+      Recommended: plain threading in Phase 4 so you can test headless.
+      Phase 5 re-homes the same logic into QThread workers. Keep the
+      transport logic GUI-agnostic so the move is mechanical.
+
+  Q3. SECOND DATA PORT OR SAME-SOCKET STREAMING for file bytes?
+      Recommended: same-socket streaming with a length frame (Improvement
+      D). Drizzle opens a second port (matches the FileRequest `port`
+      field), but same-socket is simpler, firewall-friendlier, and you
+      control both ends. If you go same-socket, `port` in FileRequest
+      becomes vestigial — leave it for protocol compatibility, ignore it.
+
+  Q4. ONE LOCK ON THE SERVER SOCKET — non-negotiable?
+      Recommended: YES. The heartbeat thread + user-driven calls share
+      it. Without the lock you WILL get interleaved frames. This is the
+      single most important correctness decision in Phase 4.
+
+  Q5. AUTO-ACCEPT DIRECT TRANSFERS in headless mode?
+      Recommended: a flag (auto_accept=True for tests, prompt in Phase 5).
+      Lets you verify 4.7 without a GUI.
+
+  Q6. PERSIST CHAT HISTORY / DOWNLOAD PROGRESS to disk now?
+      Recommended: progress YES (needed for resume, 4.6.4), chat history
+      NO (in-memory per session; Phase 7 if wanted).
+
+  Q7. WHAT'S THE TEST DRIVER?
+      Recommended: a tiny CLI/REPL on ClientCore (commands: register,
+      browse <u>, search <q>, msg <u> <text>, get <u> <path>). No GUI.
+      This is your Phase 4 verification harness — same spirit as
+      verify_phase3.py.
+
+
+================================================================================
+HOW TO VERIFY PHASE 4 IS DONE
+================================================================================
+
+Run the Phase 3 server, then TWO ClientCore instances (two terminals,
+"alice" and "bob"). Drive them via the CLI driver (Q7). On ONE machine,
+both peers are 127.0.0.1 — fine for everything except REQUEST_UNAME-by-IP
+(the same localhost-collision caveat from Phase 3; test cross-uname
+features on two machines if you can, or trust the unit behavior).
+
+  Test 1 — foundation: both register, both publish share data, both
+  appear in each other's heartbeat as online. Kill one; within
+  ONLINE_TIMEOUT the other sees it drop.
+
+  Test 2 — browse + search: alice browses bob's tree and sees his files;
+  alice searches a filename bob shares and gets a result with owner=bob.
+
+  Test 3 — chat: alice msg bob "hello"; bob's listener logs/notifies the
+  message with sender=alice. Reverse direction too.
+
+  Test 4 — download: alice `get bob <path>`; file lands in alice's
+  Downloads, SHA-1 verifies, and bob's server record gets the hash filled
+  in (browse again, hash is no longer None). Try a folder.
+
+  Test 5 — pause/resume: start a large-ish download, pause mid-stream
+  (temp file partial), resume, confirm final hash matches and the file is
+  whole. Kill the client mid-download and confirm the journal lets you
+  resume after restart.
+
+  Test 6 — direct transfer: alice pushes a file to bob; bob accepts;
+  file lands in bob's Downloads, verified. Then bob rejects one; alice
+  sees the rejection cleanly.
+
+Phase 4 is done when all six pass, no socket leaks (netstat on 4321 and
+1234), and killing a peer mid-anything never crashes the other side.
+
+
+================================================================================
+WHAT'S NOT IN PHASE 4 (resist scope creep)
+================================================================================
+
+  - Any PyQt GUI. Phase 5. Keep core.py GUI-agnostic.
+  - QThread workers. Phase 5 re-homes your plain threads.
+  - Compression (CompressionMethod.ZSTD). The fields exist; actually
+    compressing before transfer is a Phase 7 optimization. Send
+    uncompressed (compression=NONE) for now.
+  - Network discovery (mDNS). Clients are told the server IP. Phase 7.
+  - TLS / auth. LAN plaintext, same as the server.
+  - Multi-server / reconnect-on-server-restart. If the server dies, the
+    client surfaces it; auto-reconnect is a nicety, not Phase 4.
+
+
+================================================================================
+RECOMMENDED ORDER OF WORK FOR PHASE 4
+================================================================================
+
+  Session 1: Scaffold ClientCore. App dirs, settings load/save, connect
+             to server, register, publish share data. Drive from a REPL.
+             Reuse socket_functions wholesale. (4.1)
+
+  Session 2: Heartbeat thread + the server-socket Lock. Two clients see
+             each other online/offline. This proves your concurrency
+             foundation before you build on it. (4.1.5, Q4)
+
+  Session 3: Peer listener (accept loop) + chat send/receive. First true
+             P2P round-trip. (4.2)
+
+  Session 4: Browse + search (server-mediated). Mostly wiring over
+             existing helpers; quick win. (4.3, 4.4)
+
+  Session 5: Single-file download — the FILE_REQUEST handshake, streaming,
+             temp-first, hash verify. The hard one; go slow. (4.5.1-4.5.4)
+
+  Session 6: Folder download + lazy hashing / UPDATE_HASH round-trip.
+             (4.5.3-4.5.4)
+
+  Session 7: Pause / resume / progress journal. (4.6)
+
+  Session 8: Direct transfer (push) with consent. (4.7)
+
+  Session 9: Two-client (ideally two-machine) end-to-end run of all six
+             verification tests. Bug-fix whatever surfaces. Delete the
+             prototype client.py / p2p.py.
+
+That's roughly the 2-3 weeks the timeline budgets for "Very High" effort.
+Build strictly bottom-up: nothing in 4.5+ works until the listener (4.2)
+and the locked server socket (4.1) are solid.
+
+
+================================================================================
+                              END OF PLAN
+================================================================================
