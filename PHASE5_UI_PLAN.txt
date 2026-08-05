@@ -147,7 +147,8 @@ One new class, client/adapter.py (or inside app.py to start):
       transfer_request   = pyqtSignal(object, object)       # 4.7 consent
       connection_lost    = pyqtSignal(str)                  # reason
 
-It OWNS a ClientCore and a PeerListener, and does three jobs:
+It OWNS a ClientCore and a PeerListener (and, per 5.3.8, the share-folder
+watcher), and does three jobs:
 
   (a) FORWARD EVENTS OUT. Give ClientCore plain-Python callback hooks
       (self.on_peers_changed, self.on_message, ...) that default to
@@ -255,7 +256,10 @@ STEP 5.2.4 — SettingsDialog (Drizzle: SettingsDialog.py, 230)
 Edits UserSettings fields; Save routes through adapter ->
 core.save_settings. If share_folder_path changed, call
 publish_share_data() (worker!) so the server index follows the
-setting. Drizzle forgets this until restart.
+setting. Drizzle forgets this until restart. And when share_folder_path
+changes, ALSO re-point the auto-rescan watcher (5.3.8) — stop the old
+Observer, start one on the new path — so the automatic sync follows the
+setting too, not just this one publish.
 
 --------------------------------------------------------------------------------
 STEP 5.2.5 — FileSearchDialog (Drizzle: FileSearchDialog.py, 262)
@@ -399,6 +403,58 @@ when the window is minimized/unfocused (QApplication.applicationState)
 and otherwise relies on in-window cues. Honor show_notifications from
 settings, as now.
 
+--------------------------------------------------------------------------------
+STEP 5.3.8 — Share auto-rescan (rescan-on-change)
+--------------------------------------------------------------------------------
+This is Phase 4 Improvement F, deferred to here because it only pays off
+with a UI: keep the server's index of YOUR share in sync automatically
+when files appear/disappear/change under SHARE_FOLDER_PATH, instead of
+making the user click "Share/Rescan" after every edit. Drizzle has
+nothing like it — a stale share tree until manual re-publish is exactly
+the kind of paper cut this removes.
+
+MECHANISM (recommended: watchdog observer)
+  - The adapter owns a watchdog Observer watching SHARE_FOLDER_PATH
+    recursively. Its event handler runs on watchdog's OWN thread, so it
+    obeys the same rule as the heartbeat/listener threads: it touches NO
+    widgets and calls NO locked core method directly. It does exactly one
+    thing — emit a thread-safe adapter signal (share_changed).
+  - DEBOUNCE, or you will republish dozens of times per file copy. A
+    single "paste a folder in" fires a storm of created/modified events.
+    The share_changed slot (GUI thread) (re)starts a single-shot
+    QTimer(QUIET_PERIOD ~2s); only when the timer finally fires — i.e.
+    ~2s after the LAST event — does it kick ONE publish_share_data()
+    through a QThreadPool worker (never on the GUI thread; it takes
+    server_lock and does a round-trip). A burst collapses to one publish.
+  - publish_share_data already republishes the WHOLE tree and the server
+    REPLACES the record (UPDATE_SHARE_DATA). Do NOT compute and send
+    incremental deltas — whole-tree republish is idempotent, cheap at LAN
+    share sizes, and is exactly what your manual Share button does.
+
+UI FEEDBACK (small, optional, worth it)
+  - A brief status cue ("Updating share..." -> "Share updated") so the
+    user sees the automatic action; a silent background republish that
+    occasionally fails is worse than a visible one.
+  - If the user is currently viewing their OWN share tree, re-render it
+    after a successful republish (adapter emits share_republished -> slot
+    redraws). Viewing someone else's tree: do nothing.
+
+MANUAL COMPANION (keep it)
+  - The RIGHT pane's Import File/Folder and Share buttons (5.2.3) stay.
+    Auto-rescan is the hands-free path; the manual button is the "do it
+    now, don't wait for the debounce" escape hatch and the fallback when
+    the watcher is disabled. NICE SIMPLIFICATION: because the watcher
+    catches any change under the share root, Import File/Folder no longer
+    needs to call publish itself — dropping the file into the share dir
+    triggers the same republish path.
+
+FALLBACK (zero new dependency): a periodic rescan — a QTimer every N
+seconds that runs publish_share_data in a worker (optionally only when a
+cheap top-level mtime scan shows change). Simpler, no watchdog dep, but
+laggy and wasteful. Prefer watchdog; fall back only if you don't want the
+dependency (Q8). NOTE: watchdog is NOT in the Pipfile yet — adding it is
+the one new dependency this feature costs.
+
 
 ================================================================================
 PHASE 5.4 — QT THREADING
@@ -416,6 +472,11 @@ STEP 5.4.1 — Decide the thread map (write it down)
                         running as-is; its callback -> adapter signal.
   PeerListener        — your existing accept loop + per-connection
                         workers. KEEP. Callbacks -> adapter signals.
+  share watcher       — watchdog Observer thread (5.3.8), if enabled.
+                        Emits share_changed -> adapter; a GUI-thread
+                        debounce timer turns an event burst into ONE
+                        pooled publish. Plain (non-Qt) thread, like the
+                        two above.
   QThreadPool         — short-lived workers for user-initiated
                         blocking calls (connect/register/browse/
                         search/publish) and per-file transfers.
@@ -476,12 +537,15 @@ forget it. Rules for Phase 5:
 --------------------------------------------------------------------------------
 STEP 5.4.5 — Shutdown ordering
 --------------------------------------------------------------------------------
-closeEvent: dump the progress journal, stop() the PeerListener, close
-the server socket, THEN accept the close. Your Phase 4 daemon threads
-die with the process — but flush anything they might be mid-writing
-first (the journal write must not race a dying transfer worker; pause
-active transfers before dumping, like Drizzle's dump_progress_data
-flow, 1358-1362 + app.py:46-51).
+closeEvent: dump the progress journal, stop the share watcher
+(observer.stop(); observer.join(), if enabled), stop() the PeerListener,
+close the server socket, THEN accept the close. Your Phase 4 daemon
+threads die with the process — but flush anything they might be
+mid-writing first (the journal write must not race a dying transfer
+worker; pause active transfers before dumping, like Drizzle's
+dump_progress_data flow, 1358-1362 + app.py:46-51). GOTCHA: the watchdog
+Observer is NOT a daemon thread — join it explicitly or it can keep the
+process alive after the window closes.
 
 
 ================================================================================
@@ -592,8 +656,17 @@ IMPROVEMENTS YOU CAN ADD BEYOND DRIZZLE
      Phase 4 Improvement G's bytes/sec, shown in the FileProgressWidget
      label. Small, visible, satisfying in demos.
 
+  H. SHARE AUTO-RESCAN (5.3.8)
+     Phase 4 Improvement F, realized here: watch SHARE_FOLDER_PATH and
+     auto-republish (debounced) so a peer's browse reflects your file
+     changes without anyone clicking Rescan. Drizzle leaves the index
+     stale until manual re-publish. Costs one dependency (watchdog) or a
+     periodic-timer fallback (Q8).
+
 Pick 2-3 beyond A/B/E which you should treat as non-negotiable: (D) is
-the highest demo value; (F) matters the moment you test on a real LAN.
+the highest demo value; (F) matters the moment you test on a real LAN;
+(H) is a small, obviously-correct polish that shows the share staying
+live without a manual step.
 
 
 ================================================================================
@@ -641,6 +714,15 @@ DECISIONS TO MAKE BEFORE STARTING PHASE 5
       at the end (Session 9). Styling before wiring is procrastination
       with screenshots.
 
+  Q8. AUTO-RESCAN: watchdog OR periodic rescan? (5.3.8)
+      Recommended: watchdog Observer with a ~2s debounce — event-driven,
+      instant, no busy polling; the cost is one new dependency (watchdog,
+      not yet in the Pipfile). Fall back to a periodic-timer rescan only
+      if you want zero new deps and can accept the lag. Either way:
+      debounce (coalesce event bursts), republish the WHOLE tree via a
+      worker (never on the GUI thread), and re-point the watcher when
+      share_folder_path changes.
+
 
 ================================================================================
 HOW TO VERIFY PHASE 5 IS DONE
@@ -662,7 +744,10 @@ caveats as Phase 4 verification).
   (empty share -> placeholder, not error); File Info shows size via
   convert_size and "unverified" hash; search dialog finds a file with
   owner attribution, empty query -> no request, no-results -> calm
-  message; Go-to-owner selects and browses.
+  message; Go-to-owner selects and browses. Auto-rescan (5.3.8): drop a
+  new file into bob's share folder — bob clicks nothing; alice hits
+  Refresh (browse is pull-based) within a second or two and the new file
+  is there, proving bob's index auto-republished on the change.
 
   Test 4 — chat: bidirectional messages render with sender styling;
   history survives switching users; over-length input is blocked at
@@ -722,7 +807,8 @@ RECOMMENDED ORDER OF WORK FOR PHASE 5
   Session 4: Live user list + selection gating + connection banner.
              (5.3.1, 5.3.2, 5.3.6)
 
-  Session 5: Share tree + File Info dialog + Refresh. (5.3.3, 5.2.6)
+  Session 5: Share tree + File Info dialog + Refresh + share auto-rescan.
+             (5.3.3, 5.2.6, 5.3.8)
 
   Session 6: Chat pane + notification routing. (5.3.4, 5.3.7)
 
