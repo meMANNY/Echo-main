@@ -27,7 +27,7 @@ from utils.constants import (
 from utils.exceptions import ExceptionCodes, RequestException
 from utils.protocol import send_text, receive_message, send_msgpack
 from utils.socket_functions import update_share_data,request_ip,request_uname
-from utils.types import DirData, Message, UserSettings, HeaderCode, ItemSearchResult
+from utils.types import DirData, Message, TransferProgress, UserSettings, HeaderCode, ItemSearchResult,TransferStatus
 
 
 
@@ -59,13 +59,14 @@ class ClientCore:
         #Peer tracking
 
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
-
+        self.transfer_progress: dict[str, TransferProgress] = {}  # Maps transfer ID -> TransferProgress
         self.first_run: bool = False  # Flag to indicate if it's the first run of the application
         self._setup_directories()
         self.settings: UserSettings = self._load_settings()
         self.message_history: dict[str, list[Message]] = {}  # In-memory message history per peer username
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,daemon=True)
         self.heartbeat_thread.start()
+        self.transfer_lock = threading.Lock()  # Lock to synchronize access to transfer_progress
         logger.info("Heartbeat thread started.")
 
         logger.info(
@@ -553,8 +554,60 @@ class ClientCore:
                 self._teardown_server_socket()
                 return False
                 
-    
+    def _percent(received: int, total: int) -> float:
+        return (received / total * 100) if total > 0 else 100.0
 
+    def start_transfer(self,key: str,total: int, received: int = 0) -> None:
+        """Register a new (or resumed) download. received is non-zero on resume"""
+
+        with self.transfer_lock:
+            self.transfer_progress[key] = {
+                "status": TransferStatus.DOWNLOADING,
+                "progress": received,
+                "total": total,
+                "percent_progress": self._percent(received, total)
+            }
+
+
+    def update_transfer(self,key:str,received: int) -> None:
+        """Update bytes-received for an active transfer(called each chunk)."""
+
+        with self.transfer_lock:
+            rec = self.transfer_progress.get(key)
+            if rec is None:
+                logger.warning(f"Attempted to update non-existent transfer '{key}'.")
+                return
+            rec["progress"] = received
+            rec["percent_progress"] = self._percent(received, rec["total"])
+
+    def set_transfer_status(self,key: str, status: TransferStatus) -> None:
+        """Update the status of an active transfer."""
+
+        with self.transfer_lock:
+            rec = self.transfer_progress.get(key)
+            if rec is None:
+                logger.warning(f"Attempted to set status for non-existent transfer '{key}'.")
+                return
+            rec["status"] = status
+
+    def get_transfer(self,key: str) -> Optional[TransferProgress]:
+        """Return a SNAPSHOT copy so the ui reads a consistent view lock-free."""
+
+        with self.transfer_lock:
+            rec = self.transfer_progress.get(key)
+            return dict(rec) if rec is not None else None  # Return a copy to prevent external mutation
+
+    def get_active_transfers(self) -> dict[str, TransferProgress]:
+        """Return a SNAPSHOT copy of all active transfers so the ui reads a consistent view lock-free."""
+
+        with self.transfer_lock:
+            return {k: dict(v) for k, v in self.transfer_progress.items()}  # Return copies to prevent external mutation
+
+    def remove_transfer(self,key: str) -> None:
+        with self.transfer_lock:
+            self.transfer_progress.pop(key, None)  # Remove the transfer if it exists, do nothing otherwise
+    
+        
 
 
 

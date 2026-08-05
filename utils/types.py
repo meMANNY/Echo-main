@@ -40,6 +40,7 @@ class TransferProgress(TypedDict):
     status: TransferStatus
     progress: int
     percent_progress: float
+    total: int
 
 class ProgressBarData(TypedDict):
     current: int
