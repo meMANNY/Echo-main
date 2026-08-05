@@ -6,7 +6,7 @@ import time
 import re
 from pathlib import Path
 from typing import Callable, Optional
-
+_SPEED_ALPHA = 0.3
 import msgpack
 
 from utils.constants import (
@@ -60,6 +60,7 @@ class ClientCore:
         #Peer tracking
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
         self.transfer_progress: dict[str, TransferProgress] = {}  # Maps transfer ID -> TransferProgress
+        self._transfer_timing: dict[str,dict] = {}
         self.pause_events: dict[str, threading.Event] = {}  # Maps transfer ID -> threading.Event for pausing/resuming transfers
 
         # Consent policy for inbound direct transfers (4.7): return True to accept.
@@ -500,13 +501,20 @@ class ClientCore:
                 "status": TransferStatus.DOWNLOADING,
                 "progress": received,
                 "total": total,
-                "percent_progress": self._percent(received, total)
+                "percent_progress": self._percent(received, total),
+                "speed_bps": 0.0,
+                "eta_seconds": None
             }
+            self._transfer_timing[key] = {
+                "last_t": time.perf_counter(),
+                "last_bytes": received,
+                "ema_bps" : None,
+            } 
 
 
     def update_transfer(self,key:str,received: int) -> None:
         """Update bytes-received for an active transfer(called each chunk)."""
-
+        now = time.perf_counter()
         with self.transfer_lock:
             rec = self.transfer_progress.get(key)
             if rec is None:
