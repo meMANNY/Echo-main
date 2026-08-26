@@ -45,3 +45,34 @@ class MainWindowShell(QMainWindow):
                 logger.error(f"Error stopping server: {e}")
 
         event.accept()  # Accept the close event to proceed with closing the window 
+
+
+def main():
+    """
+    Initialize the application and start the main event loop.
+    """
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("Echo")
+
+    from client.core import ClientCore
+    core = ClientCore()
+
+    if core.first_run:
+        logger.info("First run detected. Performing initial setup...")
+        from client.ui.start_window import StartWindow
+        main_window = StartWindow(core)
+    else:
+        logger.info("Returning user detected. Launching main application window...")
+        from client.ui.main_window import EchoMainWindow
+        main_window = EchoMainWindow(core)
+
+    main_window.center_on_screen()
+    main_window.show()
+
+    #start the event loop
+    sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    main()
