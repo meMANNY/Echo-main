@@ -7,11 +7,14 @@
 CONTEXT
 -------
 Phase 4 gave you a headless client engine: ClientCore (client/core.py)
-owns the persistent server socket behind server_lock, registration,
-settings, share publishing, the heartbeat thread, chat send + history,
-notifications, browse and search. PeerListener (client/peer_listener.py)
-owns the inbound accept loop and dispatch. Everything is Qt-free and
-testable from a terminal — which was the whole point.
+drives the persistent server link through a ServerConnection
+(client/server_connection.py) that owns the socket AND its lock, plus
+registration, settings, share publishing, the heartbeat thread, chat
+send + history, notifications, browse, search, and the full transfer
+stack (download, folder download, pause/resume, progress journal, direct
+transfer). PeerListener (client/peer_listener.py) owns the inbound accept
+loop and dispatch. Everything is Qt-free and terminal-testable
+(verify_phase4.py) — which was the whole point.
 
 Phase 5 puts a face on that engine. By the end of it you should be able
 to hand someone the app: they double-click, pick a username, see who is
@@ -27,21 +30,23 @@ Phase 5 mirrors sections 5.1-5.4 of PROGRESS_AND_TASKS.txt:
                             progress area, context actions
   5.4 Qt Threading        — workers, signals/slots, thread affinity
 
-PREREQUISITE — BE HONEST ABOUT WHERE PHASE 4 STANDS
-----------------------------------------------------
-As of this writing, Phase 4 sections 4.1-4.4 are implemented and
-reviewed; 4.5-4.7 (downloads, pause/resume, direct transfer) are NOT
-yet built. That does not block starting Phase 5 — but it shapes the
-order:
+PREREQUISITE — PHASE 4 IS COMPLETE AND VERIFIED
+------------------------------------------------
+UPDATE (post-verification): ALL of Phase 4 (4.1-4.7 — foundation,
+messaging, browse/search, download, folder download, pause/resume/
+journal, direct transfer) is now built AND verified end-to-end.
+verify_phase4.py runs the real ClientCore against the real server and
+passes all six of the plan's tests (24/24 checks). Improvements A
+(ServerConnection), B (peer-socket timeouts), and G (transfer rate/ETA)
+are also in. So Phase 5 is unblocked front to back:
 
-  - Sessions 1-7 below (shell, adapter, user list, browse, chat,
-    search) depend only on 4.1-4.4. Start any time.
-  - Sessions 8-9 (progress widgets, pause/resume, consent dialog)
-    bind directly to 4.5/4.6/4.7 structures (TransferProgress, the
-    progress journal, DIRECT_TRANSFER_REQUEST). Finish those in the
-    headless client FIRST, verify them from the REPL driver, and only
-    then build their UI. Building UI against transfer code that has
-    never run headless means debugging two unknowns at once.
+  - Sessions 1-7 (shell, adapter, user list, browse, chat, search)
+    depend only on 4.1-4.4 — start any time.
+  - Sessions 8-9 (progress widgets, pause/resume, consent dialog) bind
+    to 4.5/4.6/4.7 structures (TransferProgress — now carrying speed_bps
+    /eta_seconds too — the JSON journal, DIRECT_TRANSFER_REQUEST). Those
+    are done and verified, so you're building UI on transport that has
+    actually run, not debugging two unknowns at once.
 
 CRITICAL ARCHITECTURAL FACT — THE GUI THREAD RULE
 --------------------------------------------------
@@ -160,6 +165,12 @@ watcher), and does three jobs:
       a non-GUI thread is SAFE — that is the entire point; Qt sees the
       receiver lives on the GUI thread and queues the call.
       Core stays importable without Qt; headless tests still run.
+      NOTE (post-Improvement-A): connection teardown now happens inside
+      ServerConnection, not in a core method you can drop a hook into.
+      For the connection_lost signal (5.3.6), add an on_connection_lost
+      hook that fires the moment `connected` goes False — cleanest is a
+      callback ServerConnection invokes on teardown, surfaced through
+      core so the adapter still only ever talks to core.
 
   (b) RUN BLOCKING CALLS OFF THE GUI THREAD. connect_to_server(),
       register(), browse(), search(), publish_share_data() all block
@@ -288,7 +299,9 @@ resume toggle button. Three Drizzle details worth copying exactly:
     (lines 77, 122): progress in basis points, so files of any size
     get smooth bar motion despite int-only QProgressBar.
   - setFormat(f"{convert_size(cur)}/{convert_size(total)}") — human
-    numbers on the bar itself.
+    numbers on the bar itself. TransferProgress also carries speed_bps
+    and eta_seconds now (Improvement G, computed in core) — append them
+    to the label, e.g. "1.2 MB/s | 8s left".
   - The widget takes pause_signal/resume_signal in its constructor
     (52-53) and emits them with its own path as payload (83-87) —
     the widget doesn't know HOW pausing works, it just emits. Your
@@ -386,13 +399,16 @@ keep your JSON journal, see Improvement C).
 STEP 5.3.6 — Connection state surface
 --------------------------------------------------------------------------------
 Something Drizzle lacks entirely: a visible connected/connecting/
-disconnected indicator. Your core already tears down the socket and
-flips self.connected on failure; forward that moment through
-adapter.connection_lost and render it (status bar text + disable the
-server-dependent buttons + a Reconnect button that re-runs
-connect+register in a worker). Without this, a dead server just looks
-like "everyone went offline," which you know from Phase 4 debugging is
-maddening.
+disconnected indicator. Your core tears down the dead socket in
+ServerConnection on any transport failure, and `connected` (now a
+DERIVED property — registered AND socket-open — not a manual flag)
+reflects that instantly. Forward that moment through
+adapter.connection_lost via the on_connection_lost hook from 5.1.2(a)
+(there's no longer a flag-flip to piggyback on), and render it (status
+bar text + disable the server-dependent buttons + a Reconnect button
+that re-runs connect+register in a worker). Without this, a dead server
+just looks like "everyone went offline," which you know from Phase 4
+debugging is maddening.
 
 --------------------------------------------------------------------------------
 STEP 5.3.7 — Notifications through the GUI
@@ -424,8 +440,8 @@ MECHANISM (recommended: watchdog observer)
     The share_changed slot (GUI thread) (re)starts a single-shot
     QTimer(QUIET_PERIOD ~2s); only when the timer finally fires — i.e.
     ~2s after the LAST event — does it kick ONE publish_share_data()
-    through a QThreadPool worker (never on the GUI thread; it takes
-    server_lock and does a round-trip). A burst collapses to one publish.
+    through a QThreadPool worker (never on the GUI thread; it locks the
+    server connection and does a round-trip). A burst collapses to one publish.
   - publish_share_data already republishes the WHOLE tree and the server
     REPLACES the record (UPDATE_SHARE_DATA). Do NOT compute and send
     incremental deltas — whole-tree republish is idempotent, cheap at LAN
@@ -520,14 +536,15 @@ directly on a runnable is a classic hour-loser.
 STEP 5.4.4 — Locks across the boundary
 --------------------------------------------------------------------------------
 Drizzle guards its server socket with a QMutex (server_socket_mutex,
-e.g. 1487-1495 in download_files). You already guard yours with
-threading.Lock INSIDE core methods — which is better: callers can't
-forget it. Rules for Phase 5:
-  - Do NOT add QMutex around adapter calls into core; core locks
-    itself. Double-locking the same logical resource from two
+e.g. 1487-1495 in download_files). You go one better: Improvement A is
+already built — ServerConnection owns the socket + its lock, and every
+exchange goes through request()/run(), so a caller CAN'T forget to lock
+or touch the raw socket. Rules for Phase 5:
+  - Do NOT add QMutex around adapter calls into core; ServerConnection
+    locks itself. Double-locking the same logical resource from two
     layers is how UI deadlocks are born.
-  - The GUI thread must never WAIT on server_lock for long: it never
-    calls core's locked methods directly (workers do). That rule is
+  - The GUI thread must never WAIT on that lock for long: it never
+    calls core's server methods directly (workers do). That rule is
     what keeps a slow server from freezing paint.
   - Shared dicts written by workers and read by slots (e.g. progress
     structs) are fine when writes stay in the worker and the UI only
@@ -653,8 +670,11 @@ IMPROVEMENTS YOU CAN ADD BEYOND DRIZZLE
      during fast LAN transfers.
 
   G. TRANSFER RATE / ETA IN THE PROGRESS ROW
-     Phase 4 Improvement G's bytes/sec, shown in the FileProgressWidget
-     label. Small, visible, satisfying in demos.
+     ALREADY HALF-DONE: Phase 4 Improvement G shipped, so TransferProgress
+     now carries speed_bps + eta_seconds, computed (EMA-smoothed) in core.
+     Phase 5's job is pure rendering — show them in the FileProgressWidget
+     label. Put format_speed/format_eta in utils/helpers.py (next to
+     convert_size), NOT in core — they're presentation.
 
   H. SHARE AUTO-RESCAN (5.3.8)
      Phase 4 Improvement F, realized here: watch SHARE_FOLDER_PATH and
@@ -683,7 +703,7 @@ DECISIONS TO MAKE BEFORE STARTING PHASE 5
 
   Q2. ADAPTER (COMPOSITION) OR ClientCore(QObject)?
       Recommended: composition adapter (5.1.2). Core stays Qt-free and
-      headless-testable; the REPL driver keeps working forever, which
+      headless-testable; verify_phase4.py keeps working forever, which
       is also your fastest bug-repro tool once the GUI exists.
 
   Q3. RE-HOME CORE'S THREADS INTO QTHREADS?
@@ -767,9 +787,10 @@ caveats as Phase 4 verification).
   server returns. At no point does the OS mark the app "not
   responding".
 
-Phase 5 is done when all six pass on two machines, the REPL driver
-STILL works headless (proof the core stayed clean), and grep finds no
-PyQt5 import anywhere under client/core.py or client/peer_listener.py.
+Phase 5 is done when all six pass on two machines, verify_phase4.py
+STILL passes headless (proof the core stayed Qt-free and unbroken), and
+grep finds no PyQt5 import anywhere under client/core.py,
+client/peer_listener.py, or client/server_connection.py.
 
 
 ================================================================================
@@ -790,8 +811,8 @@ WHAT'S NOT IN PHASE 5 (resist scope creep)
 RECOMMENDED ORDER OF WORK FOR PHASE 5
 ================================================================================
 
-  Session 0: PREREQUISITE — finish 4.5-4.7 headless + REPL-verified
-             if not already done. Do not start Session 8 without it.
+  Session 0: PREREQUISITE — DONE. 4.5-4.7 are built and verified headless
+             (verify_phase4.py, all six tests green). Session 8 unblocked.
 
   Session 1: app.py entry + MainWindow shell + ErrorDialog +
              StartWindow/BasicConfigWindow first-run chain (reusing
