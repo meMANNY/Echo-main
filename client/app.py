@@ -25,3 +25,23 @@ class MainWindowShell(QMainWindow):
         center_point = QDesktopWidget().availableGeometry().center()
         frame_geometry.moveCenter(center_point)
         self.move(frame_geometry.topLeft())
+
+    def closeEvent(self, event):
+        """
+        clean shutdown hook:
+        """
+
+        logger.info("Shutting down application...")
+        if self.peer_listener:
+            try:
+                self.peer_listener.stop()
+            except Exception as e:
+                logger.error(f"Error stopping peer listener: {e}")
+
+        if hasattr(self.core, "server") and self.core.server:
+            try:
+                self.core.server.stop()
+            except Exception as e:
+                logger.error(f"Error stopping server: {e}")
+
+        event.accept()  # Accept the close event to proceed with closing the window 
