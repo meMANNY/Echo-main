@@ -48,5 +48,29 @@ class StartWindow(QWidget):
 
         self.setLayout(layout)
         self.center_on_screen()
-    
+
+    def center_on_screen(self):
+        frame_geometry = self.frameGeometry()
+        center_point = self.screen().availableGeometry().center()
+        frame_geometry.moveCenter(center_point)
+        self.move(frame_geometry.topLeft())
+
+    def on_continue(self):
+        username = self.uname_input.text().strip()
+        if not username:
+            self.error_label.setText("Username cannot be empty.")
+            return
+
+        if " " in username:
+            self.error_label.setText("Username cannot contain spaces.")
+            return
+
+
+        # If all validations pass, proceed to the next window
+        self.error_label.setText("")  # Clear any previous error messages
+        logger.info(f"Username '{username}' accepted. Proceeding to basic configuration window.")
+        self.config_window = BasicConfigWindow(self.core, username)
+        self.config_window.show()
+        self.close()  # Close the start window after opening the basic config window
+        
 
