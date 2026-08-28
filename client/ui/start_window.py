@@ -27,5 +27,26 @@ class StartWindow(QWidget):
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
 
-        
+        sub_label = QLabel("Please enter your username to continue:")
+        sub_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(sub_label)
+
+        self.uname_input = QLineEdit()
+        self.uname_input.setPlaceholderText("Enter username")
+        self.uname_input.returnPressed.connect(self.on_continue)  # Connect the return key to the continue action
+        layout.addWidget(self.uname_input)
+
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: red;font-size: 11px;")
+        self.error_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.error_label)
+
+        self.btn_continue = QPushButton("Continue")
+        self.btn_continue.setFixedHeight(34)
+        self.btn_continue.clicked.connect(self.on_continue)
+        layout.addWidget(self.btn_continue)
+
+        self.setLayout(layout)
+        self.center_on_screen()
+    
 
