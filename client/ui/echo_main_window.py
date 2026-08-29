@@ -198,16 +198,6 @@ class EchoMainWindow(QMainWindow):
         self.adapter.peers_changed.connect(self._on_peers_changed)
         self.adapter.connection_lost.connect(self._on_connection_lost)
 
-    def _on_peers_changed(self, peers: dict):
-        # minimal rebuild; 5.3.1 will diff in place to keep selection/flicker sane
-        self.user_list.clear()
-        for uname in peers:
-            self.user_list.addItem(f"● {uname}")
-
-    def _on_connection_lost(self, reason: str):
-        self.lbl_status.setText("● Disconnected")
-        self.lbl_status.setStyleSheet("color: #c0392b; font-weight: bold;")
-        self.btn_reconnect.setEnabled(True)
 
     def _maybe_auto_connect(self):
         """Returning-user flow (5.1.3): if we arrived here not yet connected,
@@ -225,15 +215,6 @@ class EchoMainWindow(QMainWindow):
             s.get("uname", ""), s.get("server_ip", ""), self._on_connect_done
         )
 
-    def _on_connect_done(self, success: bool, message: str):
-        if success:
-            self.lbl_status.setText("● Connected")
-            self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
-            self.btn_reconnect.setEnabled(False)
-        else:
-            self._on_connection_lost(message)
-            from client.ui.error_dialog import ErrorDialog
-            ErrorDialog(message, parent=self).exec_()
 
     def closeEvent(self, event):
         """Clean shutdown (5.1.1 step 4 / 5.4.5): stop background owners the
