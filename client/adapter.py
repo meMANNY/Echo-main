@@ -54,4 +54,23 @@ class CoreAdapter(QObject):
         self.core.on_transfer_progress = lambda key,prog: self.transfer_progress.emit(key, prog)
         self.core.on_connection_lost = lambda reason: self.connection_lost.emit(reason)
 
-        
+
+    #async helpers for blocking core calls
+
+    def run_async(self,fn, on_success = None, on_error = None, *args, **kwargs):
+        """Run a blocking function in a background thread and handle its result or error."""
+        worker = Worker(fn, *args, **kwargs)
+        if on_success:
+            worker.signals.result.connect(on_success)
+        if on_error:
+            worker.signals.error.connect(on_error)
+        self.thread_pool.start(worker)
+
+    def browse_async(self,target_uname: str,on_success, on_error = None):
+        self.run_async(self.core.browse, on_success, on_error, target_uname)
+    def search_async(self,query: str,on_success, on_error = None):
+        self.run_async(self.core.search, on_success, on_error, query)
+    def send_chat_async(self,target_uname: str,text: str,on_success = None, on_error = None):
+        self.run_async(self.core.send_chat, on_success, on_error, target_uname, text)
+    def publish_share_async(self,on_success = None, on_error = None):
+        self.run_async(self.core.publish_share_data, on_success, on_error)
