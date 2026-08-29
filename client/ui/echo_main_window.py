@@ -340,5 +340,24 @@ class EchoMainWindow(QMainWindow):
         self.chat_display.clear()
         self.file_tree.clear()
 
+    def _on_connection_lost(self, reason: str):
+        server_ip = self.adapter.core.settings.get("server_ip", "unknown")
+        logger.warning(f"Connection to server {server_ip} lost: {reason}")
+        self.lbl_status.setText("● Disconnected")
+        self.lbl_status.setStyleSheet("color: #c0392b; font-weight: bold;")
+        self.btn_reconnect.setEnabled(True)
+        self.btn_search.setEnabled(False)
+
+        #mark all listed users as offline
+        for i in range(self.user_list.count()):
+            item = self.user_list.item(i)
+            uname = item.data(Qt.UserRole)
+            item.setText(f"○ {uname}(offline)")
+            item.setForeground(QColor("gray"))
+        if self.selected_peer:
+            self._update_gated_controls(is_online=False)
+
+    
+
 
     
