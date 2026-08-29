@@ -8,6 +8,21 @@ from PyQt5.QtWidgets import (
 )
 logger = logging.getLogger(__name__)
 
+# ┌────────────────────────────────────────────────────────────────────────────────────────┐
+# │  👤 alice  │  ● Connected (127.0.0.1)  │  [Reconnect]     [🔍 Search]   [⚙ Settings]  │
+# ├─────────────────────┬────────────────────────────────────┬─────────────────────────────┤
+# │ 👥 USERS            │ 💬 CHAT (with 'bob')               │ 📁 FILES & TRANSFERS        │
+# │                     │                                    │                             │
+# │  ● bob (online)     │ ┌────────────────────────────────┐ │ [Tree: bob's files]         │
+# │  ○ charlie (2m ago) │ │ bob: Hi Alice!                 │ │ 📄 notes.pdf (2.4 MB)       │
+# │                     │ │ alice: Hey Bob!                │ │ 📁 projects/                │
+# │                     │ └────────────────────────────────┘ │                             │
+# │                     │ [Type message...        ] [Send]   │ [Download] [Info] [Refresh] │
+# │                     │                                    │ ─────────────────────────── │
+# │                     │                                    │ ⬇ TRANSFERS                 │
+# │                     │                                    │ [notes.pdf === 65% === ⏸]   │
+# └─────────────────────┴────────────────────────────────────┴─────────────────────────────┘
+
 class EchoMainWindow(QMainWindow):
     def __init__(self,adapter):
         super().__init__()
@@ -47,3 +62,29 @@ class EchoMainWindow(QMainWindow):
         center_point = QDesktopWidget().availableGeometry().center()
         frame_geometry.moveCenter(center_point)
         self.move(frame_geometry.topLeft())
+
+    #top bar
+    def _create_top_bar(self):
+        bar = QFrame()
+        bar.setFrameShape(QFrame.StyledPanel)
+        bar.setStyleSheet("QFrame { background-color: #f5f5f5; border-radius: 4px; padding: 4px; }")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        uname = self.adapter.core.settings.get("uname", "Unknown")
+        self.lbl_user_info = QLabel(f"👤 Logged in as: <b>{uname}</b>")
+        layout.addWidget(self.lbl_user_info)
+        layout.addSpacing(20)
+        self.lbl_status = QLabel("● Connected")
+        self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+        self.btn_reconnect = QPushButton("Reconnect")
+        self.btn_reconnect.setEnabled(False)  # Enabled only on disconnect
+        layout.addWidget(self.btn_reconnect)
+        layout.addStretch()
+        self.btn_search = QPushButton("🔍 Search Network")
+        layout.addWidget(self.btn_search)
+        self.btn_settings = QPushButton("⚙ Settings")
+        layout.addWidget(self.btn_settings)
+        return bar
+
+    
