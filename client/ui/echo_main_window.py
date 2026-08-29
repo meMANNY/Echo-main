@@ -33,6 +33,7 @@ class EchoMainWindow(QMainWindow):
         self._wire_stub_actions()
         self._connect_adapter_signals()
         self._maybe_auto_connect()
+        self.user_list.currentItemChanged.connect(self._on_user_selection_changed)
 
     def init_ui(self):
         self.setWindowTitle(f"Echo — P2P File Sharing & Chat ({self.adapter.core.settings.get('uname', '')})")
@@ -287,6 +288,38 @@ class EchoMainWindow(QMainWindow):
         if self.selected_peer:
             is_online = self.selected_peer in online_dict
             self._update_gated_controls(is_online)
+
+    def _on_user_selection_changed(self, current: QListWidgetItem, previous: QListWidgetItem):
+        """
+        Called when the user selects a different peer in the left pane.
+        Updates the center and right panes accordingly.
+        """
+        if current is None:
+            self.selected_peer = None
+            self._disable_all_peer_controls()
+            return
+
+        uname = current.data(Qt.UserRole)
+        self.selected_peer = uname
+        is_online = uname in self.adapter.core.online_peers
+
+        #update chat header and controls
+        logger.info(f"Selected peer changed to: {uname} (online: {is_online})")
+        self.lbl_chat_header.setText(f"<b>Chat with {uname}</b>" if is_online else f"<b>Chat with {uname} (offline)</b>")
+        # is_online = uname in self.adapter.core.peers
+        self._update_gated_controls(is_online)
+
+        self._render_chat_history(uname)
+        #async browse the files if online
+        if is_online:
+            self.lbl_files_header.setText(f"<b>{uname}'s Shared Files</b> (loading...)")
+            self.file_tree.clear()
+            self.adapter.browse_async(uname,on_success = self._on_browse_success, on_error = self._on_browse_error)
+        else:
+            self.lbl_files_header.setText(f"<b>{uname}'s Shared Files</b> (offline)")
+            self.file_tree.clear()
+
+    
 
 
     
