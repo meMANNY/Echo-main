@@ -54,4 +54,18 @@ class BasicConfigWindow(QWidget):
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
 
+        #server IP
+        layout.addWidget(QLabel("Enter the server IP address:"))
+        self.ip_input = QLineEdit("127.0.0.1")
+        layout.addWidget(self.ip_input)
+
+        layout.addWidget(QLabel("Select the folder to share:"))
+        h_share = QHBoxLayout()
+        self.share_input = QLineEdit(str(SHARE_FOLDER_PATH))
+        btn_browse_share = QPushButton("Browse...")
+        btn_browse_share.clicked.connect(self.browse_share)
+        h_share.addWidget(self.share_input)
+        h_share.addWidget(btn_browse_share)
+        layout.addLayout(h_share)
+
         
