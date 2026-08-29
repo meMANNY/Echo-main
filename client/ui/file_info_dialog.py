@@ -1,5 +1,5 @@
 import logging
-from PyQt5.QtWidgets import QApplication, QFormLayout, QMainWindow, QDesktopWidget, QVBoxLayout
+from PyQt5.QtWidgets import QApplication, QFormLayout, QHBoxLayout, QLabel, QMainWindow, QDesktopWidget, QPushButton, QVBoxLayout
 from PyQt5.QtCore import Qt
 from utils.helpers import convert_size
 
@@ -28,5 +28,30 @@ class FileInfoDialog(QMainWindow):
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(8)
 
-        
+        name_lbl = QLabel(f"<b>{name}</b>")
+        path_lbl = QLabel(self.item_data.get("path", "/"))
+        type_lbl = QLabel("Folder" if is_dir else "File")
+        raw_size = self.item_data.get("size", 0)
+        size_lbl = QLabel("—" if is_dir else f"{convert_size(raw_size)} ({raw_size:,} bytes)")
+        raw_hash = self.item_data.get("hash")
+        hash_lbl = QLabel("—" if is_dir else (raw_hash if raw_hash else "Unverified (computed on first download)"))
+        hash_lbl.setWordWrap(True)
+        form.addRow("Name:", name_lbl)
+        form.addRow("Relative Path:", path_lbl)
+        form.addRow("Type:", type_lbl)
+        form.addRow("Size:", size_lbl)
+        form.addRow("SHA-1 Hash:", hash_lbl)
+        layout.addLayout(form)
+        layout.addStretch()
+
+        # Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.setDefault(True)
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+
 
