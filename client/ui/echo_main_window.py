@@ -98,4 +98,31 @@ class EchoMainWindow(QMainWindow):
         layout.addWidget(self.user_list)
         return pane
 
+    #center pane
+    def _create_center_pane(self):
+        pane = QFrame()
+        pane.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.lbl_chat_header = QLabel("<i>Select a user to chat</i>")
+        layout.addWidget(self.lbl_chat_header)
+        # Message History Display
+        self.chat_display = QTextEdit()
+        self.chat_display.setReadOnly(True)
+        layout.addWidget(self.chat_display)
+        # Input Box + Send Button
+        h_input = QHBoxLayout()
+        self.chat_input = QLineEdit()
+        self.chat_input.setPlaceholderText("Type a message...")
+        self.chat_input.setEnabled(False)
+        self.btn_send_chat = QPushButton("Send")
+        self.btn_send_chat.setEnabled(False)
+        h_input.addWidget(self.chat_input)
+        h_input.addWidget(self.btn_send_chat)
+        layout.addLayout(h_input)
+        return pane
+
+    #right pane
+    
+
     
