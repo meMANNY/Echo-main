@@ -9,3 +9,28 @@ from utils.constants import SHARE_FOLDER_PATH, RECV_FOLDER_PATH
 
 logger = logging.getLogger(__name__)
 
+class RegistrationWorker(QThread):
+    """Runs network connection and registration off the main thread to avoid blocking the UI."""
+
+    #(success: bool, error_message: str)
+    finished = pyqtSignal(bool, str) #should not be defined in the __init__
+
+    def __init__(self, core, username,server_ip):
+        super().__init__()
+        self.core = core
+        self.username = username
+        self.server_ip = server_ip
+
+    def run(self):
+        #connect to central server
+        if not self.core.connect_to_server(self.server_ip):
+            self.finished.emit(False, "Failed to connect to the server. Please check the IP address and try again.")
+            return
+
+        #register the user
+        if not self.core.register(self.username):
+            self.finished.emit(False, "Registration failed. Please try again.")
+            return
+
+        self.core.publish_share_data()
+        self.finished.emit(True, "Registration successful!")
