@@ -123,6 +123,52 @@ class EchoMainWindow(QMainWindow):
         return pane
 
     #right pane
-    
+    def _create_right_pane(self) -> QWidget:
+        pane = QFrame()
+        pane.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(6, 6, 6, 6)
+        # 1. Peer Shared Files Header
+        self.lbl_files_header = QLabel("<b>Shared Files</b>")
+        layout.addWidget(self.lbl_files_header)
+        # 2. File Tree Widget
+        self.file_tree = QTreeWidget()
+        self.file_tree.setHeaderLabels(["Name", "Size", "Type", "Hash"])
+        self.file_tree.setColumnWidth(0, 180)
+        layout.addWidget(self.file_tree)
+        # 3. File Action Buttons
+        h_buttons = QHBoxLayout()
+        self.btn_download = QPushButton("Download")
+        self.btn_file_info = QPushButton("File Info")
+        self.btn_refresh_tree = QPushButton("Refresh")
+        self.btn_download.setEnabled(False)
+        self.btn_file_info.setEnabled(False)
+        self.btn_refresh_tree.setEnabled(False)
+        h_buttons.addWidget(self.btn_download)
+        h_buttons.addWidget(self.btn_file_info)
+        h_buttons.addWidget(self.btn_refresh_tree)
+        layout.addLayout(h_buttons)
+        # Divider
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(divider)
+        # 4. Downloads & Transfers Area
+        layout.addWidget(QLabel("<b>Active Transfers</b>"))
+        
+        self.transfers_scroll = QScrollArea()
+        self.transfers_scroll.setWidgetResizable(True)
+        self.transfers_scroll.setFixedHeight(140)
+        
+        self.transfers_container = QWidget()
+        self.transfers_layout = QVBoxLayout(self.transfers_container)
+        self.transfers_layout.setContentsMargins(4, 4, 4, 4)
+        self.transfers_layout.setSpacing(4)
+        self.transfers_layout.addStretch()  # pushes progress rows to the top
+        
+        self.transfers_scroll.setWidget(self.transfers_container)
+        layout.addWidget(self.transfers_scroll)
+        return pane
+
 
     
