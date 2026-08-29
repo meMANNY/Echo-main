@@ -64,7 +64,7 @@ def main():
         main_window = StartWindow(core)
     else:
         logger.info("Returning user detected. Launching main application window...")
-        from client.ui.main_window import EchoMainWindow
+        from client.ui.echo_main_window import EchoMainWindow
         main_window = EchoMainWindow(core)
 
     main_window.center_on_screen()

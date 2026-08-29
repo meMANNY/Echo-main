@@ -139,7 +139,7 @@ class BasicConfigWindow(QWidget):
         self.btn_finish.setEnabled(True)
         if success:
             logger.info("Registration successful. User can now use the application.")
-            from client.ui.main_window import EchoMainWindow
+            from client.ui.echo_main_window import EchoMainWindow
             self.main_window = EchoMainWindow(self.core)
             self.main_window.show()
             self.close()  # Close the configuration window
