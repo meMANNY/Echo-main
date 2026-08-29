@@ -1,6 +1,15 @@
 import logging
 from PyQt5.QtCore import QObject, pyqtSignal,QRunnable, QThreadPool,pyqtSlot
 
+# watchdog powers share auto-rescan (5.3.8); kept optional so the app still runs
+# (with rescan disabled) if it isn't installed.
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    _WATCHDOG_AVAILABLE = True
+except ImportError:
+    _WATCHDOG_AVAILABLE = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +48,13 @@ class CoreAdapter(QObject):
     notification = pyqtSignal(str,str)  # Signal to notify the GUI of important events (e.g., errors, status updates)
     transfer_progress = pyqtSignal(str,dict)  # Signal to notify the GUI of file transfer progress (filename, percentage)
     connection_lost = pyqtSignal(str)  # Signal to notify the GUI when the connection to the server is lost
+    share_changed = pyqtSignal()  # a change under SHARE_FOLDER_PATH (debounced -> republish, 5.3.8)
 
     def __init__(self, core):
         super().__init__()
         self.core = core
         self.thread_pool = QThreadPool()  # Thread pool for managing background workers
+        self.share_observer = None  # watchdog Observer watching our share folder (5.3.8)
         self._wire_core_callbacks()  # Wire up core callbacks to emit signals to the GUI
 
     def _wire_core_callbacks(self):
@@ -93,3 +104,42 @@ class CoreAdapter(QObject):
             on_success=lambda result: on_done(*result),
             on_error=lambda err: on_done(False, err),
         )
+
+    # --- share auto-rescan (5.3.8) ------------------------------------------
+
+    def start_share_watch(self):
+        """Watch SHARE_FOLDER_PATH recursively; on ANY change emit share_changed
+        (thread-safe — the handler runs on watchdog's own thread and only pokes
+        the signal). The UI debounces that into one publish_share_data. No-op if
+        watchdog isn't installed or we're already watching."""
+        if not _WATCHDOG_AVAILABLE:
+            logger.warning("watchdog not installed — share auto-rescan disabled.")
+            return
+        if self.share_observer is not None:
+            return
+        share_path = self.core.settings.get("share_folder_path")
+        if not share_path:
+            return
+        adapter = self
+
+        class _ShareHandler(FileSystemEventHandler):
+            def on_any_event(self, event):
+                adapter.share_changed.emit()
+
+        self.share_observer = Observer()
+        self.share_observer.schedule(_ShareHandler(), share_path, recursive=True)
+        self.share_observer.daemon = True
+        self.share_observer.start()
+        logger.info(f"Share watcher started on {share_path}")
+
+    def stop_share_watch(self):
+        """Stop the share watcher (call on shutdown, or before re-pointing it at
+        a new share folder). The Observer is NOT a daemon by contract, so join it
+        so it can't outlive the window."""
+        if self.share_observer is not None:
+            try:
+                self.share_observer.stop()
+                self.share_observer.join(timeout=2)
+            except Exception as e:
+                logger.error(f"Error stopping share watcher: {e}")
+            self.share_observer = None

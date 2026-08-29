@@ -1,17 +1,17 @@
 import logging
-from PyQt5.QtWidgets import QApplication, QFormLayout, QHBoxLayout, QLabel, QMainWindow, QDesktopWidget, QPushButton, QVBoxLayout
+from PyQt5.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 from PyQt5.QtCore import Qt
 from utils.helpers import convert_size
 
 logger = logging.getLogger(__name__)
 
 
-class FileInfoDialog(QMainWindow):
-    """Dialog to display file information.
-    Read-only details view of a selected DirData Node."""
+class FileInfoDialog(QDialog):
+    """Read-only details view of a selected DirData node (5.2.6). Modal dialog,
+    so it must subclass QDialog — that's what gives us exec_() and accept()."""
 
-    def __init__(self, item_data: dict,parent=None):
-        super().__init__()
+    def __init__(self, item_data: dict, parent=None):
+        super().__init__(parent)
         self.item_data = item_data
         self.init_ui()
 

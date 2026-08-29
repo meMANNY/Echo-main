@@ -46,6 +46,12 @@ class EchoMainWindow(QMainWindow):
         self._rescan_timer.setInterval(2000)  # 2-second quiet period
         self._rescan_timer.timeout.connect(self._trigger_auto_republish)
 
+        # 5.3.8: watchdog Observer (in the adapter) -> share_changed -> restart the
+        # debounce timer -> one republish. This is the detection source that was
+        # missing; the timer alone had nothing to fire it.
+        self.adapter.share_changed.connect(self.trigger_share_rescan)
+        self.adapter.start_share_watch()
+
     def init_ui(self):
         self.setWindowTitle(f"Echo — P2P File Sharing & Chat ({self.adapter.core.settings.get('uname', '')})")
         self.resize(1100, 700)
@@ -231,13 +237,13 @@ class EchoMainWindow(QMainWindow):
         """Clean shutdown (5.1.1 step 4 / 5.4.5): stop background owners the
         adapter may hold, then close the server connection."""
         logger.info("Shutting down Echo…")
-        for attr in ("peer_listener", "share_observer"):
-            obj = getattr(self.adapter, attr, None)
-            if obj is not None:
-                try:
-                    obj.stop()
-                except Exception as e:
-                    logger.error(f"Error stopping {attr}: {e}")
+        self.adapter.stop_share_watch()  # stop + join the watchdog Observer
+        listener = getattr(self.adapter, "peer_listener", None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception as e:
+                logger.error(f"Error stopping peer listener: {e}")
         try:
             self.adapter.core.server.close()
         except Exception as e:
@@ -422,34 +428,6 @@ class EchoMainWindow(QMainWindow):
         logger.error(f"Browse failed for '{self.selected_peer}': {err}")
         self.file_tree.clear()
         self.lbl_files_header.setText(f"<b>{self.selected_peer or ''}'s Shared Files</b> (error)")
-
-    def _on_tree_selection_changed(self):
-        selected = self.file_tree.selectedItems()
-        has_valid_item = False
-
-        if selected:
-            data = selected[0].data(0, Qt.UserRole)
-            has_valid_item = data is not None 
-
-        self.btn_download.setEnabled(has_valid_item)
-        self.btn_file_info.setEnabled(has_valid_item and len(selected) == 1)  # only enable info if exactly one item is selected
-
-    def _refresh_current_tree(self):
-        if self.selected_peer and self.selected_peer in self.adapter.core.online_peers:
-            self.lbl_files_header.setText(f"<b>{self.selected_peer}'s Shared Files</b> (refreshing...)")
-            #self.file_tree.clear()
-            self.adapter.browse_async(self.selected_peer, on_success=self._on_browse_success, on_error=self._on_browse_error)
-
-    def _open_file_info(self):
-        selected = self.file_tree.selectedItems()
-        if not selected:
-            logger.warning("File info requested but no single item is selected.")
-            return
-        data = selected[0].data(0, Qt.UserRole)
-        if data:
-            from client.ui.file_info_dialog import FileInfoDialog
-            dialog = FileInfoDialog(data, parent=self)
-            dialog.exec_()
 
     def _on_tree_selection_changed(self):
         """Called when the user selects an item in the file tree."""
