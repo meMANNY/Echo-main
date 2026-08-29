@@ -34,3 +34,24 @@ class RegistrationWorker(QThread):
 
         self.core.publish_share_data()
         self.finished.emit(True, "Registration successful!")
+
+class BasicConfigWindow(QWidget):
+    def __init__(self,core,chosen_uname):
+        super().__init__()
+        self.core = core
+        self.chosen_uname = chosen_uname
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("Echo - Initial Configuration")
+        self.setFixedSize(480,320)  # Set a fixed size for the window
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(25, 20, 25, 20)  
+        layout.setSpacing(10)
+
+        title = QLabel(f"Initial Configuration for {self.chosen_uname}")
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        layout.addWidget(title)
+
+        
