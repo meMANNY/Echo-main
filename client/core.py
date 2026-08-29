@@ -74,6 +74,11 @@ class ClientCore:
         self._setup_directories()
         self.journal: dict[str,JournalEntry] = self._load_journal()
         self.settings: UserSettings = self._load_settings()
+        self.on_peers_changed: Optional[Callable[[dict], None]] = None  # Callback for when the online_peers dictionary changes
+        self.on_message_received: Optional[Callable[[dict], None]] = None  # Callback for when a new message is received (peer_uname, message)
+        self.on_notification: Optional[Callable[[str, str], None]] = None  # Callback for notifications (title, body)
+        self.on_transfer_progress: Optional[Callable[[str, dict], None]] = None  # Callback for transfer progress updates (transfer_id, progress)
+        self.on_connection_lost: Optional[Callable[[str], None]] = None  # Callback for when the connection to the server is lost
         self.message_history: dict[str, list[Message]] = {}  # In-memory message history per peer username
         self.transfer_lock = threading.Lock()  # Lock to synchronize access to transfer_progress
         self.journal_lock = threading.Lock() #guards the journal and file write
