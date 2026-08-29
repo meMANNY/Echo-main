@@ -298,6 +298,8 @@ class ClientCore:
         # Update the online_peers dictionary with the active peers
         self.online_peers = active
         logger.debug(f"Updated online peers: {list(self.online_peers.keys())}")
+        if self.on_peers_changed:
+            self.on_peers_changed(dict(self.online_peers))  # Invoke the callback with the updated online peers
 
     def request_peer_ip(self,username: str) -> Optional[str]:
         """ Queries the server for the IP address of a given peer username. Returns the IP address as a string if found, or None if not found or on error. """
@@ -333,6 +335,8 @@ class ClientCore:
         """ Appends a message to the in-memory message history for a given peer. """
 
         sender = self.settings["uname"] if is_self else peer_uname
+        if not is_self and self.on_message_received:
+            self.on_message_received({"sender": sender, "content": content})
         #setdefault is atomic: both a sender thread and a peer-handler thread
         #get the SAME list back, so concurrent first messages can't clobber
         #each other (a separate check-then-set would race).
@@ -379,13 +383,8 @@ class ClientCore:
             peer_sock.close()
 
     def notify(self, title: str, body: str) -> None:
-        """ Thin notification wrapper (Step 4.2.4).
-
-        Honors settings["show_notifications"]. Fires a desktop notification
-        via notify-py when available, and always logs. Phase 5 replaces this
-        with a GUI route (signal/toast) — callers just use notify(title, body).
-        Never raises: a notification failure must not crash the caller
-        (typically a peer-listener worker thread). """
+        """ Thin notification wrapper.
+        If the user has disabled notifications in settings, this method will log"""
 
         if not self.settings.get("show_notifications", True):
             logger.debug(f"Notification suppressed (show_notifications off): {title}")
@@ -400,6 +399,8 @@ class ClientCore:
                 #block=False: don't stall the calling thread on the OS call
                 notification.send(block=False)
             logger.info(f"[NOTIFY] {title}: {body}")
+            if self.on_notification:
+                self.on_notification(title, body)
         except Exception as e:
             #Notification failures are cosmetic — log and move on.
             logger.error(f"Failed to send desktop notification: {e}")
@@ -541,6 +542,8 @@ class ClientCore:
                     rec["speed_bps"] = t["ema_bps"]
                     remaining = max(rec["total"] - received, 0)
                     rec["eta_seconds"] =  (remaining / t["ema_bps"]) if t["ema_bps"] > 0 else None
+        if self.on_transfer_progress:
+            self.on_transfer_progress(key, dict(rec))  # Send a copy to avoid external mutation
 
     def set_transfer_status(self,key: str, status: TransferStatus) -> None:
         """Update the status of an active transfer."""
