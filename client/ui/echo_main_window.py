@@ -1,6 +1,6 @@
 import logging
 import time
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QTextEdit, QLineEdit, QPushButton,
@@ -40,6 +40,11 @@ class EchoMainWindow(QMainWindow):
         self.file_tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.btn_refresh_tree.clicked.connect(self._refresh_current_tree)
         self.btn_file_info.clicked.connect(self._open_file_info)
+        
+        self._rescan_timer = QTimer(self)
+        self._rescan_timer.setSingleShot(True)
+        self._rescan_timer.setInterval(2000)  # 2-second quiet period
+        self._rescan_timer.timeout.connect(self._trigger_auto_republish)
 
     def init_ui(self):
         self.setWindowTitle(f"Echo — P2P File Sharing & Chat ({self.adapter.core.settings.get('uname', '')})")
@@ -478,4 +483,15 @@ class EchoMainWindow(QMainWindow):
             from client.ui.file_info_dialog import FileInfoDialog
             dialog = FileInfoDialog(data, parent=self)
             dialog.exec_()
+
+    def trigger_share_rescan(self):
+        """ Restarts the 2s debounce timer on file events """
+        self._rescan_timer.start()
+
+    def _trigger_auto_republish(self):
+        """ Publishes the updated share tree off the GUI thread """
+        logger.info("Auto-rescan debounce expired. Publishing updated share data to server...")
+        self.adapter.publish_share_async(
+            on_success=lambda: logger.info("Share data auto-republished successfully.")
+        )
     
