@@ -1,12 +1,14 @@
 import logging
+import time
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
-    QListWidget, QTextEdit, QLineEdit, QPushButton, 
-    QTreeWidget, QTreeWidgetItem, QLabel, QFrame, 
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QListWidget, QTextEdit, QLineEdit, QPushButton,
+    QTreeWidget, QTreeWidgetItem, QLabel, QFrame,
     QScrollArea, QDesktopWidget, QListWidgetItem
 )
 from PyQt5.QtGui import QColor
+from utils.helpers import convert_size
 logger = logging.getLogger(__name__)
 
 # ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -29,6 +31,7 @@ class EchoMainWindow(QMainWindow):
         super().__init__()
         self.adapter = adapter
         self.selected_peer = None
+        self._last_seen: dict = {}  # uname -> last epoch seen online (widget-owned memory, 5.3.1)
         self.init_ui()
         self._wire_stub_actions()
         self._connect_adapter_signals()
@@ -240,35 +243,32 @@ class EchoMainWindow(QMainWindow):
         and maintain the current selection."""
 
         my_uname = self.adapter.core.settings.get("uname", "")
+        self._last_seen.update(online_dict)  # remember when we last saw each peer online
 
         existing_items = {}
-
         for i in range(self.user_list.count()):
             item = self.user_list.item(i)
-            uname = item.data(Qt.UserRole)  # strip the "● " prefix
-            existing_items[uname] = item
+            existing_items[item.data(Qt.UserRole)] = item
 
+        # online peers: update in place or append (never touch self)
         for uname in online_dict:
             if uname == my_uname:
-                continue  # skip self
-            if uname in existing_items:
-                item = existing_items[uname]  # still online, keep it
-                item.setText(f"● {uname}(online)")  # refresh the text in case it changed
-                item.setForeground(QColor("green"))
-            else:
-                new_item = QListWidgetItem(f"● {uname}(online)")
-                new_item.setData(Qt.UserRole, uname)
-                new_item.setForeground(QColor("green"))
-                self.user_list.addItem(new_item)
+                continue
+            item = existing_items.get(uname)
+            if item is None:
+                item = QListWidgetItem()
+                item.setData(Qt.UserRole, uname)
+                self.user_list.addItem(item)
+            item.setText(f"● {uname} (online)")
+            item.setForeground(QColor("green"))
 
-        for uname,item in existing_items.items():
+        # anyone still listed but no longer online -> grey with last-active
+        for uname, item in existing_items.items():
             if uname not in online_dict:
-                item.setText(f"○ {uname}(offline)")
-                item.setForeground(QColor("gray"))
+                self._mark_item_offline(item, uname)
 
         if self.selected_peer:
-            is_online = self.selected_peer in online_dict
-            self._update_gated_controls(is_online)
+            self._update_gated_controls(self.selected_peer in online_dict)
 
     def _on_user_selection_changed(self, current: QListWidgetItem, previous: QListWidgetItem):
         """
@@ -329,12 +329,10 @@ class EchoMainWindow(QMainWindow):
         self.btn_reconnect.setEnabled(True)
         self.btn_search.setEnabled(False)
 
-        #mark all listed users as offline
+        # grey every listed user (the whole server went away)
         for i in range(self.user_list.count()):
             item = self.user_list.item(i)
-            uname = item.data(Qt.UserRole)
-            item.setText(f"○ {uname}(offline)")
-            item.setForeground(QColor("gray"))
+            self._mark_item_offline(item, item.data(Qt.UserRole))
         if self.selected_peer:
             self._update_gated_controls(is_online=False)
 
@@ -350,6 +348,72 @@ class EchoMainWindow(QMainWindow):
             self._on_connection_lost(message)
             from client.ui.error_dialog import ErrorDialog
             ErrorDialog(message, parent=self).exec_()
+
+    # --- pane helpers --------------------------------------------------------
+
+    def _mark_item_offline(self, item: QListWidgetItem, uname: str):
+        item.setText(f"○ {uname} — last active {self._format_last_seen(self._last_seen.get(uname))}")
+        item.setForeground(QColor("gray"))
+
+    def _format_last_seen(self, ts) -> str:
+        if not ts:
+            return "unknown"
+        delta = time.time() - ts
+        if delta < 60:
+            return "just now"
+        if delta < 3600:
+            return f"{int(delta // 60)}m ago"
+        if delta < 86400:
+            return f"{int(delta // 3600)}h ago"
+        return f"{int(delta // 86400)}d ago"
+
+    def _render_chat_history(self, uname: str):
+        """Render the stored conversation with `uname` into the chat pane.
+        Minimal plain-text version; 5.3.4 (Session 6) swaps in the HTML
+        formatter (construct_message_html + LEADING/TRAILING_HTML)."""
+        history = self.adapter.core.message_history.get(uname, [])
+        self.chat_display.setPlainText(
+            "\n".join(f"{m.get('sender', '?')}: {m.get('content', '')}" for m in history)
+        )
+
+    def _on_browse_success(self, tree):
+        """Fill the file tree from the browsed DirData list. `tree` is None on a
+        server failure, [] for a user with an empty share, else a list[DirData].
+        5.3.3 (Session 5) refines columns/placeholders; this is the functional
+        first cut, already stashing each DirData on its row."""
+        self.file_tree.clear()
+        peer = self.selected_peer or ""
+        if tree is None:
+            self.lbl_files_header.setText(f"<b>{peer}'s Shared Files</b> (unavailable)")
+            return
+        self.lbl_files_header.setText(f"<b>{peer}'s Shared Files</b>")
+        if not tree:
+            self.file_tree.addTopLevelItem(QTreeWidgetItem(["(nothing shared)", "", "", ""]))
+            return
+        for node in tree:
+            self.file_tree.addTopLevelItem(self._build_tree_item(node))
+        self.file_tree.expandToDepth(0)
+
+    def _build_tree_item(self, node: dict) -> QTreeWidgetItem:
+        """Recursively turn a DirData node into a tree row, stashing the raw
+        DirData on column 0 (Qt.UserRole) so selection handlers read it back
+        without a re-walk (5.3.3's key trick)."""
+        is_dir = node.get("type") == "directory"
+        name = node.get("name", "?") + ("/" if is_dir else "")
+        size = "" if is_dir else convert_size(node.get("size") or 0)
+        kind = "dir" if is_dir else "file"
+        file_hash = "" if is_dir else (node.get("hash") or "unverified")
+        item = QTreeWidgetItem([name, size, kind, file_hash])
+        item.setData(0, Qt.UserRole, node)
+        for child in (node.get("children") or []):
+            item.addChild(self._build_tree_item(child))
+        return item
+
+    def _on_browse_error(self, err: str):
+        """Browse worker hit a transport error. Surface it on the file header."""
+        logger.error(f"Browse failed for '{self.selected_peer}': {err}")
+        self.file_tree.clear()
+        self.lbl_files_header.setText(f"<b>{self.selected_peer or ''}'s Shared Files</b> (error)")
 
 
     
