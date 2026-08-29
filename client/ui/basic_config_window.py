@@ -96,5 +96,53 @@ class BasicConfigWindow(QWidget):
         self.center_on_screen()
 
     def center_on_screen(self):
-        
+        frame_geometry = self.frameGeometry()
+        center_point = QDesktopWidget().availableGeometry().center()
+        frame_geometry.moveCenter(center_point)
+        self.move(frame_geometry.topLeft())
 
+    def browse_share(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Share Folder", self.share_input.text())
+        if folder:
+            self.share_input.setText(folder)
+    def browse_dl(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.dl_input.text())
+        if folder:
+            self.dl_input.setText(folder)
+
+    def on_finish(self):
+        server_ip = self.ip_input.text().strip()
+        share_path = self.share_input.text().strip()
+        dl_path = self.dl_input.text().strip()
+
+        if not server_ip:
+            QMessageBox.warning(self, "Input Error", "Server IP address cannot be empty.")
+            return
+
+        self.core.settings["uname"] = self.chosen_uname
+        self.core.settings["server_ip"] = server_ip
+        self.core.settings["share_folder_path"] = share_path
+        self.core.settings["downloads_folder_path"] = dl_path
+        self.core.save_settings(self.core.settings)
+
+        #ui state during connection
+
+        self.btn_finish.setEnabled(False)
+        self.status_label.setText("Connecting to server and registering... Please wait.")
+
+        #run registration worker
+        self.worker = RegistrationWorker(self.core, self.chosen_uname, server_ip)
+        self.worker.finished.connect(self.on_registration_finished)
+        self.worker.start()
+
+    def on_registration_finished(self, success, err_msg):
+        self.btn_finish.setEnabled(True)
+        if success:
+            logger.info("Registration successful. User can now use the application.")
+            from client.ui.main_window import EchoMainWindow
+            self.main_window = EchoMainWindow(self.core)
+            self.main_window.show()
+            self.close()  # Close the configuration window
+        else:
+            self.status_label.setText(f"Error: {err_msg}")
+            QMessageBox.critical(self, "Registration Error", err_msg)
