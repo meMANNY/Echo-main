@@ -87,4 +87,15 @@ class EchoMainWindow(QMainWindow):
         layout.addWidget(self.btn_settings)
         return bar
 
+    #left pane
+    def _create_left_pane(self):
+        pane = QFrame()
+        pane.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(QLabel("<b>Network Peers</b>"))
+        self.user_list = QListWidget()
+        layout.addWidget(self.user_list)
+        return pane
+
     
