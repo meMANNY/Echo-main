@@ -79,6 +79,9 @@ class ClientCore:
         self.on_notification: Optional[Callable[[str, str], None]] = None  # Callback for notifications (title, body)
         self.on_transfer_progress: Optional[Callable[[str, dict], None]] = None  # Callback for transfer progress updates (transfer_id, progress)
         self.on_connection_lost: Optional[Callable[[str], None]] = None  # Callback for when the connection to the server is lost
+        # ServerConnection tears the socket down on transport failure; forward
+        # that moment to on_connection_lost so the UI can react (5.3.6).
+        self.server.on_teardown = self._fire_connection_lost
         self.message_history: dict[str, list[Message]] = {}  # In-memory message history per peer username
         self.transfer_lock = threading.Lock()  # Lock to synchronize access to transfer_progress
         self.journal_lock = threading.Lock() #guards the journal and file write
@@ -300,6 +303,17 @@ class ClientCore:
         logger.debug(f"Updated online peers: {list(self.online_peers.keys())}")
         if self.on_peers_changed:
             self.on_peers_changed(dict(self.online_peers))  # Invoke the callback with the updated online peers
+
+    def _fire_connection_lost(self, reason: str) -> None:
+        """Called by ServerConnection when the socket tears down on a transport
+        failure. Forwards to the UI hook (guarded; must not raise into the
+        network layer that called it)."""
+        logger.warning(f"Server connection lost: {reason}")
+        if self.on_connection_lost:
+            try:
+                self.on_connection_lost(reason)
+            except Exception as e:
+                logger.error(f"on_connection_lost callback failed: {e}")
 
     def request_peer_ip(self,username: str) -> Optional[str]:
         """ Queries the server for the IP address of a given peer username. Returns the IP address as a string if found, or None if not found or on error. """

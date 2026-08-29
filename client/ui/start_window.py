@@ -9,10 +9,10 @@ from client.ui.basic_config_window import BasicConfigWindow
 logger = logging.getLogger(__name__)
 
 class StartWindow(QWidget):
-    def __init__(self, core):
+    def __init__(self, adapter):
         super().__init__()
-        self.core = core
-        self.init_ui()  
+        self.adapter = adapter
+        self.init_ui()
 
     def init_ui(self):
         self.setWindowTitle("Echo- Welcome")
@@ -69,7 +69,7 @@ class StartWindow(QWidget):
         # If all validations pass, proceed to the next window
         self.error_label.setText("")  # Clear any previous error messages
         logger.info(f"Username '{username}' accepted. Proceeding to basic configuration window.")
-        self.config_window = BasicConfigWindow(self.core, username)
+        self.config_window = BasicConfigWindow(self.adapter, username)
         self.config_window.show()
         self.close()  # Close the start window after opening the basic config window
         

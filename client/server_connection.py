@@ -34,6 +34,10 @@ class ServerConnection:
     def __init__(self) -> None:
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
+        # Fired (with a reason string) ONLY on an unintended transport teardown,
+        # never on a deliberate connect()/close(). ClientCore points this at its
+        # on_connection_lost hook so the UI can raise a disconnected banner.
+        self.on_teardown: Optional[Callable[[str], None]] = None
 
     @property
     def is_open(self) -> bool:
@@ -108,10 +112,23 @@ class ServerConnection:
             # semantic error (USER_EXISTS, NOT_FOUND, ...) leaves it usable.
             if e.code in TRANSPORT_FAILURE_CODES:
                 self._teardown()
+                self._notify_lost(str(e))
             raise
-        except OSError:
+        except OSError as e:
             self._teardown()
+            self._notify_lost(str(e))
             raise
+
+    def _notify_lost(self, reason: str) -> None:
+        """Tell the owner the connection dropped. The callback only emits a
+        queued Qt signal, so calling it under the lock is safe (non-blocking,
+        no re-entrancy)."""
+        cb = self.on_teardown
+        if cb is not None:
+            try:
+                cb(reason)
+            except Exception as e:
+                logger.error(f"on_teardown callback failed: {e}")
 
     def _teardown(self) -> None:
         if self._sock is not None:

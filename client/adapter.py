@@ -49,7 +49,7 @@ class CoreAdapter(QObject):
     def _wire_core_callbacks(self):
         """Wire up core callbacks to emit signals to the GUI."""
         self.core.on_peers_changed = lambda peers: self.peers_changed.emit(peers)
-        self.core.on_message_received = lambda message: self.message_received.emit({"message": message})
+        self.core.on_message_received = lambda message: self.message_received.emit(message)  # Message dict {sender, content}
         self.core.on_notification = lambda title, body: self.notification.emit(title, body)
         self.core.on_transfer_progress = lambda key,prog: self.transfer_progress.emit(key, prog)
         self.core.on_connection_lost = lambda reason: self.connection_lost.emit(reason)
@@ -71,6 +71,25 @@ class CoreAdapter(QObject):
     def search_async(self,query: str,on_success, on_error = None):
         self.run_async(self.core.search, on_success, on_error, query)
     def send_chat_async(self,target_uname: str,text: str,on_success = None, on_error = None):
-        self.run_async(self.core.send_chat, on_success, on_error, target_uname, text)
+        self.run_async(self.core.send_chat_message, on_success, on_error, target_uname, text)
     def publish_share_async(self,on_success = None, on_error = None):
         self.run_async(self.core.publish_share_data, on_success, on_error)
+
+    def connect_and_register_async(self, username: str, server_ip: str, on_done):
+        """Connect -> register -> publish share, all off the GUI thread.
+        on_done(success: bool, message: str) is delivered on the GUI thread.
+        Replaces the one-off QThread the config window used, so the whole app
+        runs on ONE worker mechanism (the pool) with the adapter as the only
+        core touchpoint."""
+        def _flow():
+            if not self.core.connect_to_server(server_ip):
+                return (False, "Failed to connect to the server. Check the IP address and try again.")
+            if not self.core.register(username):
+                return (False, "Registration failed — the username may be taken by another host.")
+            self.core.publish_share_data()
+            return (True, "Registered.")
+        self.run_async(
+            _flow,
+            on_success=lambda result: on_done(*result),
+            on_error=lambda err: on_done(False, err),
+        )

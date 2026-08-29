@@ -4,8 +4,9 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
     QListWidget, QTextEdit, QLineEdit, QPushButton, 
     QTreeWidget, QTreeWidgetItem, QLabel, QFrame, 
-    QScrollArea, QDesktopWidget
+    QScrollArea, QDesktopWidget, QListWidgetItem
 )
+from PyQt5.QtGui import QColor
 logger = logging.getLogger(__name__)
 
 # ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -29,6 +30,9 @@ class EchoMainWindow(QMainWindow):
         self.adapter = adapter
         self.selected_peer = None
         self.init_ui()
+        self._wire_stub_actions()
+        self._connect_adapter_signals()
+        self._maybe_auto_connect()
 
     def init_ui(self):
         self.setWindowTitle(f"Echo — P2P File Sharing & Chat ({self.adapter.core.settings.get('uname', '')})")
@@ -169,6 +173,120 @@ class EchoMainWindow(QMainWindow):
         self.transfers_scroll.setWidget(self.transfers_container)
         layout.addWidget(self.transfers_scroll)
         return pane
+
+    # --- behavior wiring -----------------------------------------------------
+
+    def _wire_stub_actions(self):
+        """Session 3: every action logs a line until its pane is wired up in a
+        later session."""
+        stubs = {
+            self.btn_search: "Search network",
+            self.btn_settings: "Open settings",
+            self.btn_download: "Download selected",
+            self.btn_file_info: "Show file info",
+            self.btn_refresh_tree: "Refresh tree",
+            self.btn_send_chat: "Send chat",
+        }
+        for btn, label in stubs.items():
+            btn.clicked.connect(lambda _=False, l=label: logger.info(f"[stub] {l} clicked"))
+        self.btn_reconnect.clicked.connect(self._begin_connect)
+
+    def _connect_adapter_signals(self):
+        """Minimal live bindings that prove the adapter seam end-to-end.
+        Session 4 replaces these with the in-place diff list + full banner."""
+        self.adapter.peers_changed.connect(self._on_peers_changed)
+        self.adapter.connection_lost.connect(self._on_connection_lost)
+
+    def _on_peers_changed(self, peers: dict):
+        # minimal rebuild; 5.3.1 will diff in place to keep selection/flicker sane
+        self.user_list.clear()
+        for uname in peers:
+            self.user_list.addItem(f"● {uname}")
+
+    def _on_connection_lost(self, reason: str):
+        self.lbl_status.setText("● Disconnected")
+        self.lbl_status.setStyleSheet("color: #c0392b; font-weight: bold;")
+        self.btn_reconnect.setEnabled(True)
+
+    def _maybe_auto_connect(self):
+        """Returning-user flow (5.1.3): if we arrived here not yet connected,
+        connect+register with saved settings off the GUI thread — never block
+        the first paint."""
+        if not self.adapter.core.connected:
+            self._begin_connect()
+
+    def _begin_connect(self):
+        s = self.adapter.core.settings
+        self.lbl_status.setText("● Connecting…")
+        self.lbl_status.setStyleSheet("color: #d35400; font-weight: bold;")
+        self.btn_reconnect.setEnabled(False)
+        self.adapter.connect_and_register_async(
+            s.get("uname", ""), s.get("server_ip", ""), self._on_connect_done
+        )
+
+    def _on_connect_done(self, success: bool, message: str):
+        if success:
+            self.lbl_status.setText("● Connected")
+            self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+            self.btn_reconnect.setEnabled(False)
+        else:
+            self._on_connection_lost(message)
+            from client.ui.error_dialog import ErrorDialog
+            ErrorDialog(message, parent=self).exec_()
+
+    def closeEvent(self, event):
+        """Clean shutdown (5.1.1 step 4 / 5.4.5): stop background owners the
+        adapter may hold, then close the server connection."""
+        logger.info("Shutting down Echo…")
+        for attr in ("peer_listener", "share_observer"):
+            obj = getattr(self.adapter, attr, None)
+            if obj is not None:
+                try:
+                    obj.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping {attr}: {e}")
+        try:
+            self.adapter.core.server.close()
+        except Exception as e:
+            logger.error(f"Error closing server connection: {e}")
+        event.accept()
+
+    def _on_peers_changed(self,online_dict: dict):
+        """
+        Called every 5s when the heartbeat delivers. Diffs against the 
+        existing QlistWidget in place to prevent flickering
+        and maintain the current selection."""
+
+        my_uname = self.adapter.core.settings.get("uname", "")
+
+        existing_items = {}
+
+        for i in range(self.user_list.count()):
+            item = self.user_list.item(i)
+            uname = item.data(Qt.UserRole)  # strip the "● " prefix
+            existing_items[uname] = item
+
+        for uname in online_dict:
+            if uname == my_uname:
+                continue  # skip self
+            if uname in existing_items:
+                item = existing_items[uname]  # still online, keep it
+                item.setText(f"● {uname}(online)")  # refresh the text in case it changed
+                item.setForeground(QColor("green"))
+            else:
+                new_item = QListWidgetItem(f"● {uname}(online)")
+                new_item.setData(Qt.UserRole, uname)
+                new_item.setForeground(QColor("green"))
+                self.user_list.addItem(new_item)
+
+        for uname,item in existing_items.items():
+            if uname not in online_dict:
+                item.setText(f"○ {uname}(offline)")
+                item.setForeground(QColor("gray"))
+
+        if self.selected_peer:
+            is_online = self.selected_peer in online_dict
+            self._update_gated_controls(is_online)
 
 
     

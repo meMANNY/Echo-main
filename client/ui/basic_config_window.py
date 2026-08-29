@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from PyQt5.QtCore import Qt,QThread,pyqtSignal
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QLineEdit, QHBoxLayout,
     QMessageBox, QFileDialog, QDesktopWidget
@@ -9,36 +9,10 @@ from utils.constants import SHARE_FOLDER_PATH, RECV_FOLDER_PATH
 
 logger = logging.getLogger(__name__)
 
-class RegistrationWorker(QThread):
-    """Runs network connection and registration off the main thread to avoid blocking the UI."""
-
-    #(success: bool, error_message: str)
-    finished = pyqtSignal(bool, str) #should not be defined in the __init__
-
-    def __init__(self, core, username,server_ip):
-        super().__init__()
-        self.core = core
-        self.username = username
-        self.server_ip = server_ip
-
-    def run(self):
-        #connect to central server
-        if not self.core.connect_to_server(self.server_ip):
-            self.finished.emit(False, "Failed to connect to the server. Please check the IP address and try again.")
-            return
-
-        #register the user
-        if not self.core.register(self.username):
-            self.finished.emit(False, "Registration failed. Please try again.")
-            return
-
-        self.core.publish_share_data()
-        self.finished.emit(True, "Registration successful!")
-
 class BasicConfigWindow(QWidget):
-    def __init__(self,core,chosen_uname):
+    def __init__(self, adapter, chosen_uname):
         super().__init__()
-        self.core = core
+        self.adapter = adapter
         self.chosen_uname = chosen_uname
         self.init_ui()
 
@@ -119,30 +93,31 @@ class BasicConfigWindow(QWidget):
             QMessageBox.warning(self, "Input Error", "Server IP address cannot be empty.")
             return
 
-        self.core.settings["uname"] = self.chosen_uname
-        self.core.settings["server_ip"] = server_ip
-        self.core.settings["share_folder_path"] = share_path
-        self.core.settings["downloads_folder_path"] = dl_path
-        self.core.save_settings(self.core.settings)
+        core = self.adapter.core
+        core.settings["uname"] = self.chosen_uname
+        core.settings["server_ip"] = server_ip
+        core.settings["share_folder_path"] = share_path
+        core.settings["downloads_folder_path"] = dl_path
+        core.save_settings(core.settings)
 
-        #ui state during connection
-
+        # ui state during connection
         self.btn_finish.setEnabled(False)
         self.status_label.setText("Connecting to server and registering... Please wait.")
 
-        #run registration worker
-        self.worker = RegistrationWorker(self.core, self.chosen_uname, server_ip)
-        self.worker.finished.connect(self.on_registration_finished)
-        self.worker.start()
+        # connect + register + publish, off the GUI thread, through the adapter
+        self.adapter.connect_and_register_async(
+            self.chosen_uname, server_ip, self.on_registration_finished
+        )
 
     def on_registration_finished(self, success, err_msg):
         self.btn_finish.setEnabled(True)
         if success:
-            logger.info("Registration successful. User can now use the application.")
+            logger.info("Registration successful. Opening the main window.")
             from client.ui.echo_main_window import EchoMainWindow
-            self.main_window = EchoMainWindow(self.core)
+            self.main_window = EchoMainWindow(self.adapter)
             self.main_window.show()
             self.close()  # Close the configuration window
         else:
             self.status_label.setText(f"Error: {err_msg}")
-            QMessageBox.critical(self, "Registration Error", err_msg)
+            from client.ui.error_dialog import ErrorDialog
+            ErrorDialog(err_msg, parent=self).exec_()
