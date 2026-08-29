@@ -357,7 +357,18 @@ class EchoMainWindow(QMainWindow):
         if self.selected_peer:
             self._update_gated_controls(is_online=False)
 
-    
+    def _on_connect_done(self, success: bool, message: str):
+        server_ip = self.adapter.core.settings.get("server_ip", "unknown")
+        if success:
+            self.lbl_status.setText(f"● Connected to {server_ip}")
+            self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+            self.btn_reconnect.setEnabled(False)
+            self.btn_search.setEnabled(True)
+            logger.info(f"Successfully connected and registered with server {server_ip}.")
+        else:
+            self._on_connection_lost(message)
+            from client.ui.error_dialog import ErrorDialog
+            ErrorDialog(message, parent=self).exec_()
 
 
     
