@@ -415,5 +415,32 @@ class EchoMainWindow(QMainWindow):
         self.file_tree.clear()
         self.lbl_files_header.setText(f"<b>{self.selected_peer or ''}'s Shared Files</b> (error)")
 
+    def _on_tree_selection_changed(self):
+        selected = self.file_tree.selectedItems()
+        has_valid_item = False
 
+        if selected:
+            data = selected[0].data(0, Qt.UserRole)
+            has_valid_item = data is not None 
+
+        self.btn_download.setEnabled(has_valid_item)
+        self.btn_file_info.setEnabled(has_valid_item and len(selected) == 1)  # only enable info if exactly one item is selected
+
+    def _refresh_current_tree(self):
+        if self.selected_peer and self.selected_peer in self.adapter.core.online_peers:
+            self.lbl_files_header.setText(f"<b>{self.selected_peer}'s Shared Files</b> (refreshing...)")
+            #self.file_tree.clear()
+            self.adapter.browse_async(self.selected_peer, on_success=self._on_browse_success, on_error=self._on_browse_error)
+
+    def _open_file_info(self):
+        selected = self.file_tree.selectedItems()
+        if not selected:
+            logger.warning("File info requested but no single item is selected.")
+            return
+        data = selected[0].data(0, Qt.UserRole)
+        if data:
+            from client.ui.file_info_dialog import FileInfoDialog
+            dialog = FileInfoDialog(data, parent=self)
+            dialog.exec_()
+            
     
