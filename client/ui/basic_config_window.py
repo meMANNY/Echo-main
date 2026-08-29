@@ -59,6 +59,8 @@ class BasicConfigWindow(QWidget):
         self.ip_input = QLineEdit("127.0.0.1")
         layout.addWidget(self.ip_input)
 
+        #share folder row
+
         layout.addWidget(QLabel("Select the folder to share:"))
         h_share = QHBoxLayout()
         self.share_input = QLineEdit(str(SHARE_FOLDER_PATH))
@@ -68,4 +70,31 @@ class BasicConfigWindow(QWidget):
         h_share.addWidget(btn_browse_share)
         layout.addLayout(h_share)
 
+        #receive/download folder row
+
+        layout.addWidget(QLabel("Select the folder to receive files:"))
+        h_dl = QHBoxLayout()
+        self.dl_input = QLineEdit(str(RECV_FOLDER_PATH))
+        btn_browse_dl = QPushButton("Browse...")
+        btn_browse_dl.clicked.connect(self.browse_dl)
+        h_dl.addWidget(self.dl_input)
+        h_dl.addWidget(btn_browse_dl)
+        layout.addLayout(h_dl)
+
+        #status and finish button
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #666666; font-style: italic; font-size: 12px;")
+        layout.addWidget(self.status_label)
+
+        self.btn_finish = QPushButton("Finish")
+        self.btn_finish.setFixedHeight(36)
+        self.btn_finish.clicked.connect(self.on_finish)
+        layout.addWidget(self.btn_finish)
+
+        self.setLayout(layout)
+        self.center_on_screen()
+
+    def center_on_screen(self):
         
+
