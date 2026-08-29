@@ -319,7 +319,26 @@ class EchoMainWindow(QMainWindow):
             self.lbl_files_header.setText(f"<b>{uname}'s Shared Files</b> (offline)")
             self.file_tree.clear()
 
-    
+    def _update_gated_controls(self, is_online: bool):
+        """Enable or disable controls that depend on the selected peer's online status."""
+        self.chat_input.setEnabled(is_online)
+        self.btn_send_chat.setEnabled(is_online)
+        #self.btn_download.setEnabled(is_online)
+        #self.btn_file_info.setEnabled(is_online)
+        self.btn_refresh_tree.setEnabled(is_online)
+        self.chat_input.setPlaceholderText("Type a message..." if is_online else f"{self.selected_peer} is offline")
+
+    def _disable_all_peer_controls(self):
+        """Disable all controls that depend on a selected peer."""
+        self.chat_input.setEnabled(False)
+        self.btn_send_chat.setEnabled(False)
+        self.btn_download.setEnabled(False)
+        self.btn_file_info.setEnabled(False)
+        self.btn_refresh_tree.setEnabled(False)
+        self.lbl_chat_header.setText("<i>Select a user to chat</i>")
+        #self.lbl_files_header.setText("<b>Shared Files</b>")
+        self.chat_display.clear()
+        self.file_tree.clear()
 
 
     
