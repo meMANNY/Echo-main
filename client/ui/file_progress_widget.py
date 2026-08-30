@@ -88,9 +88,25 @@ class FileProgressWidget(QFrame):
         speed_bps = progress_data.get("speed_bps")
         eta_sec = progress_data.get("eta_seconds")
         
-        if self.status == TransferStatus.PAUSED:
-            self.lbl_speed_eta.setText("Paused")
+        if self.status == TransferStatus.COMPLETED:
+            # set_transfer_status() doesn't emit progress, so the GUI pushes a
+            # terminal COMPLETED tick here when the worker returns success.
+            self.progress_bar.setValue(10000)
+            self.lbl_speed_eta.setText("✓ Done")
+            self.lbl_speed_eta.setStyleSheet("color: #27ae60; font-size: 11px; font-weight: bold;")
             if self.btn_toggle:
+                self.btn_toggle.setEnabled(False)
+                self.btn_toggle.setText("Done")
+        elif self.status == TransferStatus.FAILED:
+            self.lbl_speed_eta.setText("✗ Failed")
+            self.lbl_speed_eta.setStyleSheet("color: #c0392b; font-size: 11px; font-weight: bold;")
+            if self.btn_toggle:
+                self.btn_toggle.setEnabled(False)
+        elif self.status == TransferStatus.PAUSED:
+            self.lbl_speed_eta.setText("Paused")
+            self.lbl_speed_eta.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+            if self.btn_toggle:
+                self.btn_toggle.setEnabled(True)
                 self.btn_toggle.setText("▶ Resume")
         elif speed_bps is not None and speed_bps > 0:
             speed_str = f"{convert_size(speed_bps)}/s"

@@ -604,34 +604,59 @@ class EchoMainWindow(QMainWindow):
         logger.warning(f"Peer '{uname}' not currently found in visible peer list.")
 
     def _start_download_selected(self):
-        """Initiates a download for the currently selected file in the file tree."""
+        """Initiates a download for the currently selected file/folder in the tree.
+
+        A file gets one progress row + one worker. A folder is FLATTENED into its
+        constituent files, each getting its own row + worker keyed by that file's
+        share-relative path. This is the 5.3.5 fix: download_folder streamed each
+        file under its own per-file key, so a single folder-keyed row never
+        received any progress tick — now every file has a row whose key matches."""
         selected_items = self.file_tree.selectedItems()
         if not selected_items or not self.selected_peer:
             logger.warning("Download requested but no item is selected or no peer is selected.")
             return
         data = selected_items[0].data(0, Qt.UserRole)
-        
         owner = self.selected_peer
-        remote_path = data.get("path", "")
-        is_dir = data.get("type") == "directory"
-        size = data.get("size") or 0  # directories carry size=None; coerce so the widget/convert_size don't choke
 
-        transfer_key = transfers._transfer_key(owner, remote_path)
-        self._create_progress_widget(transfer_key,data.get("name"),size)
-
-        if is_dir:
-            self.adapter.run_async(
-                transfers.download_folder,
-                lambda ok: self._on_download_complete(transfer_key, ok),
-                lambda err: self._on_download_error(transfer_key, err),
-                self.adapter.core, owner, data,
-            )
+        if data.get("type") == "directory":
+            self._start_folder_download(owner, data)
         else:
-            self.adapter.run_async(
-                transfers.download_file,
-                lambda ok: self._on_download_complete(transfer_key, ok),
-                lambda err: self._on_download_error(transfer_key, err),
-                self.adapter.core, owner, remote_path, size,
+            self._start_file_download(owner, data)
+
+    def _start_file_download(self, owner: str, file_data: dict,
+                             dest_subpath: str = None, expected_hash: str = None):
+        """Create one progress row and spawn one download_file worker for a single
+        file. `dest_subpath` (set for folder members) mirrors the source tree under
+        Downloads; `expected_hash` skips the hash round-trip when we already have it."""
+        remote_path = file_data.get("path", "")
+        size = file_data.get("size") or 0
+        key = transfers._transfer_key(owner, remote_path)
+        if key in self._progress_widgets:
+            logger.info(f"Transfer '{key}' already active; ignoring duplicate request.")
+            return
+        self._create_progress_widget(key, file_data.get("name") or remote_path, size)
+        self.adapter.run_async(
+            transfers.download_file,
+            lambda ok: self._on_download_complete(key, ok),
+            lambda err: self._on_download_error(key, err),
+            self.adapter.core, owner, remote_path, size, 0, expected_hash, dest_subpath,
+        )
+
+    def _start_folder_download(self, owner: str, folder_data: dict):
+        """Flatten a selected folder into its files and start each as its own
+        transfer (per-file row + worker), mirroring the tree under Downloads."""
+        from utils.helpers import get_files_in_dir
+        files: list = []
+        get_files_in_dir(folder_data.get("children") or [], files)
+        if not files:
+            logger.info(f"Folder '{folder_data.get('name')}' has no files to download.")
+            from client.ui.error_dialog import ErrorDialog
+            ErrorDialog(f"'{folder_data.get('name')}' contains no files to download.", parent=self).exec_()
+            return
+        logger.info(f"Downloading folder '{folder_data.get('name')}' ({len(files)} files) from {owner}.")
+        for f in files:
+            self._start_file_download(
+                owner, f, dest_subpath=f.get("path"), expected_hash=f.get("hash")
             )
 
     def _create_progress_widget(self, key: str, filename: str, total_size: int, initial_status = TransferStatus.DOWNLOADING):
@@ -666,30 +691,82 @@ class EchoMainWindow(QMainWindow):
 
     def _resume_download(self, key: str):
         logger.info(f"Resume requested for transfer {key}")
-        owner,remote_path = key.split(":",1)
+        owner, remote_path = key.split(":", 1)
 
+        # Prefer the journal entry: it preserves the fields the in-memory record
+        # drops — the file hash and the dest_subpath needed to re-mirror a folder
+        # member back to the right place under Downloads. Fall back to the live
+        # transfer record (e.g. a pause within this same session, pre-journal-flush).
+        entry = self.adapter.core.get_journal_entry(key)
         rec = self.adapter.core.get_transfer(key)
-        total_size = rec.get("total",0) if rec else 0
+        total_size = (entry or rec or {}).get("total", 0)
+        expected_hash = entry.get("hash") if entry else None
+        dest_subpath = entry.get("dest_subpath") if entry else None
 
-        meta = {"path": remote_path, "size": total_size, "hash": None}
+        meta = {"path": remote_path, "size": total_size, "hash": expected_hash}
 
         self.adapter.run_async(
             transfers.resume_download,
             lambda ok: self._on_download_complete(key, ok),
             lambda err: self._on_download_error(key, err),
-            self.adapter.core, owner, meta,
+            self.adapter.core, owner, meta, dest_subpath,
         )
 
     def _on_download_complete(self, key: str, success: bool):
+        """Worker returned. success=True -> mark the row done and retire it after a
+        beat. success=False is ambiguous (download_file returns False on BOTH a
+        user pause and a genuine failure), so consult the transfer status to tell
+        them apart: a paused row stays put for resume, a failed one is marked ✗."""
+        widget = self._progress_widgets.get(key)
         if success:
             logger.info(f"Download completed successfully for {key}")
-            # Optionally remove row after a brief delay or leave as 100% complete
+            if widget:
+                widget.update_progress({
+                    "progress": widget.total_size, "total": widget.total_size,
+                    "status": TransferStatus.COMPLETED,
+                })
+            # Leave the ✓ visible briefly, then retire the row.
+            QTimer.singleShot(4000, lambda: self._remove_progress_widget(key))
+            return
+
+        rec = self.adapter.core.get_transfer(key)
+        status = rec.get("status") if rec else None
+        if status == TransferStatus.PAUSED:
+            logger.info(f"Download {key} paused; row kept for resume.")
+            if widget:
+                widget.update_progress({
+                    "progress": rec.get("progress", 0),
+                    "total": rec.get("total", widget.total_size),
+                    "status": TransferStatus.PAUSED,
+                })
         else:
             logger.error(f"Download failed for {key}")
+            if widget:
+                widget.update_progress({
+                    "progress": rec.get("progress", 0) if rec else 0,
+                    "total": widget.total_size, "status": TransferStatus.FAILED,
+                })
+
     def _on_download_error(self, key: str, err_msg: str):
+        """The worker raised (unexpected — download_file catches its own transport
+        errors and returns False). Mark the row failed; if somehow there's no row,
+        fall back to a dialog so the error isn't swallowed silently."""
         logger.error(f"Download worker error for {key}: {err_msg}")
-        from client.ui.error_dialog import ErrorDialog
-        ErrorDialog(f"Download error: {err_msg}", parent=self).exec_()
+        widget = self._progress_widgets.get(key)
+        if widget:
+            widget.update_progress({
+                "progress": 0, "total": widget.total_size, "status": TransferStatus.FAILED,
+            })
+        else:
+            from client.ui.error_dialog import ErrorDialog
+            ErrorDialog(f"Download error: {err_msg}", parent=self).exec_()
+
+    def _remove_progress_widget(self, key: str):
+        """Retire a finished transfer's row from the pane."""
+        widget = self._progress_widgets.pop(key, None)
+        if widget is not None:
+            self.transfers_layout.removeWidget(widget)
+            widget.deleteLater()
     def _restore_journal_transfers(self):
         """ Pre-creates PAUSED rows for any incomplete downloads found in the journal """
         resumable = self.adapter.core.get_resumable_transfers()

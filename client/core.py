@@ -666,6 +666,14 @@ class ClientCore:
         with self.journal_lock:
             return [dict(e) for e in self.journal.values() if e["status"] in resumable]
 
+    def get_journal_entry(self, key: str) -> Optional["JournalEntry"]:
+        """A SNAPSHOT of one journal entry (hash + dest_subpath preserved), so a
+        resume can re-issue the request with the same destination-mirroring and
+        integrity check the original download used. None if not journaled."""
+        with self.journal_lock:
+            entry = self.journal.get(key)
+            return dict(entry) if entry is not None else None
+
     def should_accept_transfer(self, metadata: FileMetaData) -> bool:
         """Consent decision for an inbound direct transfer (4.7.1).
 
