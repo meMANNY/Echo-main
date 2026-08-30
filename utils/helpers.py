@@ -48,23 +48,18 @@ def get_unique_filename(path: Path) -> str:
     logging.debug(f"unique file is {path}")
     return str(path)
 
-def construct_message_html(message: Message, is_self: bool)-> str:
-    """Construct HTML for a message, styling the sender's name based on whether it's the current user."""
-    
+def construct_message_html(message: dict, is_self: bool) -> str:
+    """ Construct HTML for a message with colored sender badges and content """
+    sender = "You" if is_self else message.get("sender", "Unknown")
+    color = "#2980b9" if is_self else "#d35400"
+    content = message.get("content", "").replace("<", "&lt;").replace(">", "&gt;")
+
     return f"""
-        <p style="
-        margin-top:0px;
-        margin-bottom:0px;
-        margin-left:0px;
-        margin-right:0px;
-        -qt-block-indent:0;      
-        text-indent:0px;
-        ">
-        <span style=" font-weight:600; color:{'#1a5fb4' if is_self else '#e5a50a'};">
-        {"You" if is_self else message["sender"]}:
-        </span>
-        </p>
-        """
+    <p style="margin-top: 2px; margin-bottom: 4px; font-family: 'Segoe UI', sans-serif;">
+        <span style="font-weight: bold; color: {color};">{sender}:</span>
+        <span style="color: #2c3e50; font-size: 13px;"> {content}</span>
+    </p>
+    """
 
 def path_to_dict(path: Path, share_folder_path: str) -> DirData:
     """
