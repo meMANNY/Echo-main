@@ -118,3 +118,5 @@ class SettingsDialog(QDialog):
                 on_success = lambda: logger.info("Share data published after folder change."),
             )
         self.accept()
+
+    

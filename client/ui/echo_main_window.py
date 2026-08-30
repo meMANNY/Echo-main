@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QTextEdit, QLineEdit, QPushButton,
     QTreeWidget, QTreeWidgetItem, QLabel, QFrame,
-    QScrollArea, QDesktopWidget, QListWidgetItem
+    QScrollArea, QDesktopWidget, QListWidgetItem,QMessageBox
 )
 from PyQt5.QtGui import QColor
 from client.ui.file_progress_widget import FileProgressWidget
@@ -62,6 +62,7 @@ class EchoMainWindow(QMainWindow):
         # transfer request can ever reach us.
 
         self.adapter.start_peer_listener()
+        self.adapter.core.on_direct_transfer_request = self._prompt_direct_transfer_consent
         self._restore_journal_transfers()  # 5.4.5: load any in-progress transfers from the journal
 
 
@@ -779,3 +780,37 @@ class EchoMainWindow(QMainWindow):
             
             w = self._create_progress_widget(key, filepath, size, initial_status=TransferStatus.PAUSED)
             w.update_progress({"progress": received, "total": size, "status": TransferStatus.PAUSED})
+
+    
+
+    def _prompt_direct_transfer_consent(self, metadata: dict) -> bool:
+        """
+        Called when an inbound push request arrives.
+        Pops an interactive modal asking the user to Accept or Decline.
+        """
+        sender = metadata.get("sender") or "A peer"
+        filename = metadata.get("path", "file")
+        size = metadata.get("size", 0)
+
+        # Use convert_size for readable file size
+        from utils.helpers import convert_size
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Incoming File Transfer")
+        msg_box.setText(f"<b>{sender}</b> wants to send you a file:")
+        msg_box.setInformativeText(f"📄 <b>{filename}</b> ({convert_size(size)})\n\nDo you want to accept this transfer?")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+        
+        reply = msg_box.exec_()
+        accepted = (reply == QMessageBox.Yes)
+
+        if accepted:
+            logger.info(f"User accepted direct transfer of '{filename}' from {sender}.")
+            # Create a non-pausable progress widget for the incoming stream
+            from client import transfers
+            key = transfers._transfer_key(sender, filename)
+            self._create_progress_widget(key, filename, size, allow_pause=False)
+        else:
+            logger.info(f"User declined direct transfer of '{filename}' from {sender}.")
+
+        return accepted
