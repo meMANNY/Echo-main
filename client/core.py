@@ -7,6 +7,11 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 _SPEED_ALPHA = 0.3
+# Improvement F: cap the transfer-progress signal to ~10 emits/sec per transfer.
+# At FILE_BUFFER_LEN (16 KB) a fast LAN produces thousands of chunks/sec; emitting
+# one queued cross-thread signal each would flood the GUI event loop (the "freeze
+# test"). The final tick is always emitted regardless, so the bar still lands full.
+_EMIT_INTERVAL = 0.1
 import msgpack
 
 from utils.constants import (
@@ -527,12 +532,14 @@ class ClientCore:
                 "last_t": time.perf_counter(),
                 "last_bytes": received,
                 "ema_bps" : None,
-            } 
+                "last_emit_t": 0.0,  # 0 => the first chunk emits immediately (Improvement F)
+            }
 
 
     def update_transfer(self,key:str,received: int) -> None:
         """Update bytes-received for an active transfer(called each chunk)."""
         now = time.perf_counter()
+        emit_payload = None
         with self.transfer_lock:
             rec = self.transfer_progress.get(key)
             if rec is None:
@@ -554,8 +561,19 @@ class ClientCore:
                     rec["speed_bps"] = t["ema_bps"]
                     remaining = max(rec["total"] - received, 0)
                     rec["eta_seconds"] =  (remaining / t["ema_bps"]) if t["ema_bps"] > 0 else None
-        if self.on_transfer_progress:
-            self.on_transfer_progress(key, dict(rec))  # Send a copy to avoid external mutation
+
+            # Improvement F: throttle the cross-thread emit to _EMIT_INTERVAL per
+            # transfer, but ALWAYS emit the completing tick so the bar reaches 100%
+            # even if the last chunk lands inside the throttle window. Snapshot is
+            # taken under the lock; the emit itself happens after releasing it.
+            is_final = received >= rec["total"]
+            last_emit = t.get("last_emit_t", 0.0) if t is not None else 0.0
+            if is_final or (now - last_emit) >= _EMIT_INTERVAL:
+                if t is not None:
+                    t["last_emit_t"] = now
+                emit_payload = dict(rec)  # copy to avoid external mutation
+        if emit_payload is not None and self.on_transfer_progress:
+            self.on_transfer_progress(key, emit_payload)
 
     def set_transfer_status(self,key: str, status: TransferStatus) -> None:
         """Update the status of an active transfer."""
