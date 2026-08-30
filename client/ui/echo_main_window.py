@@ -52,6 +52,7 @@ class EchoMainWindow(QMainWindow):
         self.adapter.share_changed.connect(self.trigger_share_rescan)
         self.adapter.start_share_watch()
 
+
     def init_ui(self):
         self.setWindowTitle(f"Echo — P2P File Sharing & Chat ({self.adapter.core.settings.get('uname', '')})")
         self.resize(1100, 700)
@@ -203,17 +204,21 @@ class EchoMainWindow(QMainWindow):
             self.btn_download: "Download selected",
             #self.btn_file_info: "Show file info",
             #self.btn_refresh_tree: "Refresh tree",
-            self.btn_send_chat: "Send chat",
+            #self.btn_send_chat: "Send chat",
         }
         for btn, label in stubs.items():
             btn.clicked.connect(lambda _=False, l=label: logger.info(f"[stub] {l} clicked"))
         self.btn_reconnect.clicked.connect(self._begin_connect)
+        self.btn_send_chat.clicked.connect(self._send_chat_message)
+        self.chat_input.returnPressed.connect(self._send_chat_message)
+        self.chat_input.textChanged.connect(self._on_chat_input_changed)
 
     def _connect_adapter_signals(self):
         """Minimal live bindings that prove the adapter seam end-to-end.
         Session 4 replaces these with the in-place diff list + full banner."""
         self.adapter.peers_changed.connect(self._on_peers_changed)
         self.adapter.connection_lost.connect(self._on_connection_lost)
+        self.adapter.message_received.connect(self._on_message_received)
 
 
     def _maybe_auto_connect(self):
