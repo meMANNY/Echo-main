@@ -486,11 +486,24 @@ class EchoMainWindow(QMainWindow):
         message = self.chat_input.text().strip()
         if not message:
             return  # Don't send empty messages
+
+        if len(message.encode('utf-8'))>256:
+            from client.ui.error_dialog import ErrorDialog
+            ErrorDialog("Message exceeds 256 bytes. Please shorten your message.", parent=self).exec_()
+            return
+        self.chat_input.clear()
+
+        my_uname = self.adapter.core.settings.get("uname", "You")
+        msg_obj = {"sender": my_uname, "content": message}
+
+        from utils.helpers import construct_message_html
+        self.chat_display.append(construct_message_html(msg_obj, is_self=True))
+        self._scroll_chat_to_bottom()
+        
         self.adapter.send_chat_async(
-            target_uname=self.selected_peer,
-            text=message,
-            on_success=lambda: self._on_message_sent(self.selected_peer, message),
+            self.selected_peer,
+            message,
+            on_success=None,
             on_error=lambda err: logger.error(f"Failed to send message to {self.selected_peer}: {err}")
         )
-        self.chat_input.clear()  # Clear input after sending
-    
+        
