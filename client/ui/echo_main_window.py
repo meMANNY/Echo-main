@@ -506,4 +506,11 @@ class EchoMainWindow(QMainWindow):
             on_success=None,
             on_error=lambda err: logger.error(f"Failed to send message to {self.selected_peer}: {err}")
         )
+
+    def _on_chat_input_changed(self, text: str):
+        """Enable or disable the send button based on whether there's text to send."""
+        byte_len = len(text.encode('utf-8'))
+        is_valid = 0 < byte_len <= 256
+        is_online = self.selected_peer and self.selected_peer in self.adapter.core.online_peers 
+        self.btn_send_chat.setEnabled(bool(text.strip()) and is_valid and is_online)
         
