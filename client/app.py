@@ -1,8 +1,22 @@
 import sys
 import logging
+from pathlib import Path
 from PyQt5.QtWidgets import QApplication
 
 logger = logging.getLogger(__name__)
+
+# One cohesive stylesheet for the whole app (Session 9 / plan Q7).
+_STYLE_PATH = Path(__file__).resolve().parent / "ui" / "style.qss"
+
+
+def _apply_stylesheet(app: QApplication) -> None:
+    """Load and apply the app-wide QSS. A missing/broken stylesheet must not
+    stop the app launching — it just falls back to the native Qt look."""
+    try:
+        app.setStyleSheet(_STYLE_PATH.read_text(encoding="utf-8"))
+        logger.info("Applied Echo stylesheet.")
+    except OSError as e:
+        logger.warning(f"Could not load stylesheet ({_STYLE_PATH}): {e}. Using native style.")
 
 
 def main():
@@ -10,6 +24,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Echo")
+    _apply_stylesheet(app)
 
     from client.core import ClientCore
     from client.adapter import CoreAdapter

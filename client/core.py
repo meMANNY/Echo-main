@@ -566,10 +566,18 @@ class ClientCore:
                 logger.warning(f"Attempted to set status for non-existent transfer '{key}'.")
                 return
             rec["status"] = status
+            snapshot = dict(rec)
         if status == TransferStatus.COMPLETED:
             self.journal_remove(key)
         else:
             self.journal_update_status(key, status)
+        # Surface terminal states (COMPLETED/FAILED) through the SAME hook as
+        # progress ticks, so the UI can mark a row done/failed even for transfers
+        # with no per-file completion callback (folder members, inbound pushes).
+        # update_transfer only ever emits DOWNLOADING; this is the only path a
+        # COMPLETED/FAILED status reaches the GUI.
+        if self.on_transfer_progress:
+            self.on_transfer_progress(key, snapshot)
 
 
 

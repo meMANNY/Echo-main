@@ -1,4 +1,5 @@
 import logging
+import threading
 from PyQt5.QtCore import QObject, pyqtSignal,QRunnable, QThreadPool,pyqtSlot
 
 from client.peer_listener import PeerListener
@@ -14,6 +15,19 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+class ConsentTicket:
+    """Carries an inbound-transfer consent question across the thread boundary.
+    The peer-listener thread emits (metadata, ticket), then blocks on `event`;
+    the GUI-thread slot pops the dialog, writes `accepted`, and sets `event`,
+    releasing the listener with the user's answer."""
+    __slots__ = ("event", "accepted")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.accepted = False
+
 
 class WorkerSignals(QObject):
     """Signals for asynchronous bg tasks."""
@@ -51,6 +65,7 @@ class CoreAdapter(QObject):
     transfer_progress = pyqtSignal(str,dict)  # Signal to notify the GUI of file transfer progress (filename, percentage)
     connection_lost = pyqtSignal(str)  # Signal to notify the GUI when the connection to the server is lost
     share_changed = pyqtSignal()  # a change under SHARE_FOLDER_PATH (debounced -> republish, 5.3.8)
+    transfer_request = pyqtSignal(object, object)  # 4.7 consent: (metadata, ConsentTicket)
 
     def __init__(self, core):
         super().__init__()
@@ -67,6 +82,21 @@ class CoreAdapter(QObject):
         self.core.on_notification = lambda title, body: self.notification.emit(title, body)
         self.core.on_transfer_progress = lambda key,prog: self.transfer_progress.emit(key, prog)
         self.core.on_connection_lost = lambda reason: self.connection_lost.emit(reason)
+        # 4.7 consent: core asks THIS (on the listener thread); we bounce the
+        # question to the GUI thread and block until it answers. Core never sees Qt.
+        self.core.on_direct_transfer_request = self._request_transfer_consent
+
+    def _request_transfer_consent(self, metadata) -> bool:
+        """Runs on the peer-listener thread. Popping a dialog here would break the
+        GUI-thread rule, so hand the question to the GUI thread via a queued signal
+        and wait on the ticket for the user's decision. A timeout defaults to reject
+        so a closed/hung window can never wedge the listener thread."""
+        ticket = ConsentTicket()
+        self.transfer_request.emit(metadata, ticket)
+        if not ticket.event.wait(timeout=120):
+            logger.warning("Direct-transfer consent prompt timed out; rejecting.")
+            return False
+        return ticket.accepted
 
 
     #async helpers for blocking core calls

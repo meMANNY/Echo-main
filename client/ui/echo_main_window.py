@@ -62,7 +62,6 @@ class EchoMainWindow(QMainWindow):
         # transfer request can ever reach us.
 
         self.adapter.start_peer_listener()
-        self.adapter.core.on_direct_transfer_request = self._prompt_direct_transfer_consent
         self._restore_journal_transfers()  # 5.4.5: load any in-progress transfers from the journal
 
 
@@ -241,6 +240,7 @@ class EchoMainWindow(QMainWindow):
         self.adapter.message_received.connect(self._on_message_received)
         self.adapter.notification.connect(self._on_notification)
         self.adapter.transfer_progress.connect(self._on_transfer_progress)
+        self.adapter.transfer_request.connect(self._prompt_direct_transfer_consent)  # 4.7 consent (GUI thread)
 
 
     def _maybe_auto_connect(self):
@@ -674,13 +674,15 @@ class EchoMainWindow(QMainWindow):
                 owner, f, dest_subpath=f.get("path"), expected_hash=f.get("hash")
             )
 
-    def _create_progress_widget(self, key: str, filename: str, total_size: int, initial_status = TransferStatus.DOWNLOADING):
+    def _create_progress_widget(self, key: str, filename: str, total_size: int,
+                                initial_status = TransferStatus.DOWNLOADING, allow_pause: bool = True):
         if key in self._progress_widgets:
             logger.warning(f"Progress widget for {key} already exists. Skipping creation.")
             return self._progress_widgets[key]
 
         from client.ui.file_progress_widget import FileProgressWidget
-        widget = FileProgressWidget(key,filename, total_size, initial_status = initial_status)
+        widget = FileProgressWidget(key, filename, total_size,
+                                    initial_status=initial_status, allow_pause=allow_pause)
         widget.pause_requested.connect(self._pause_download)
         widget.resume_requested.connect(self._resume_download)
 
@@ -699,6 +701,13 @@ class EchoMainWindow(QMainWindow):
             return
 
         widget.update_progress(progress_data)
+
+        # set_transfer_status now surfaces terminal states here too. A download row
+        # is also retired by _on_download_complete (idempotent double-schedule is
+        # harmless); this is the ONLY retirement path for inbound pushes, which
+        # have no per-transfer completion callback.
+        if progress_data.get("status") == TransferStatus.COMPLETED:
+            QTimer.singleShot(4000, lambda: self._remove_progress_widget(key))
 
     def _pause_download(self, key: str):
         logger.info(f"Pause requested for transfer {key}")
@@ -797,37 +806,45 @@ class EchoMainWindow(QMainWindow):
 
     
 
-    def _prompt_direct_transfer_consent(self, metadata: dict) -> bool:
-        """
-        Called when an inbound push request arrives.
-        Pops an interactive modal asking the user to Accept or Decline.
-        """
-        sender = metadata.get("sender") or "A peer"
-        filename = metadata.get("path", "file")
-        size = metadata.get("size", 0)
-
-        # Use convert_size for readable file size
+    def _prompt_direct_transfer_consent(self, metadata: dict, ticket):
+        """GUI-thread slot for an inbound push (4.7). The peer-listener thread is
+        blocked on `ticket.event`; we pop the Accept/Decline modal HERE (legal —
+        this runs on the GUI thread), record the answer on the ticket, and release
+        the listener in the `finally` so it can never wedge on our exceptions."""
+        from pathlib import Path
         from utils.helpers import convert_size
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Incoming File Transfer")
-        msg_box.setText(f"<b>{sender}</b> wants to send you a file:")
-        msg_box.setInformativeText(f"📄 <b>{filename}</b> ({convert_size(size)})\n\nDo you want to accept this transfer?")
-        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg_box.setDefaultButton(QMessageBox.Yes)
-        
-        reply = msg_box.exec_()
-        accepted = (reply == QMessageBox.Yes)
+        from client import transfers
+        try:
+            sender = metadata.get("sender") or "A peer"
+            # Mirror how transfers.py names the transfer: safe basename of the
+            # sender-chosen path, keyed by the RESOLVED sender — so the progress
+            # row we create here matches the key the receive loop ticks on.
+            safe_name = Path(metadata.get("path", "file")).name
+            size = metadata.get("size", 0)
 
-        if accepted:
-            logger.info(f"User accepted direct transfer of '{filename}' from {sender}.")
-            # Create a non-pausable progress widget for the incoming stream
-            from client import transfers
-            key = transfers._transfer_key(sender, filename)
-            self._create_progress_widget(key, filename, size, allow_pause=False)
-        else:
-            logger.info(f"User declined direct transfer of '{filename}' from {sender}.")
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Incoming File Transfer")
+            msg_box.setText(f"<b>{sender}</b> wants to send you a file:")
+            msg_box.setInformativeText(
+                f"📄 <b>{safe_name}</b> ({convert_size(size)})\n\nDo you want to accept this transfer?"
+            )
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.Yes)
 
-        return accepted
+            accepted = (msg_box.exec_() == QMessageBox.Yes)
+            ticket.accepted = accepted
+
+            if accepted:
+                logger.info(f"User accepted direct transfer of '{safe_name}' from {sender}.")
+                key = transfers._transfer_key(sender, safe_name)
+                self._create_progress_widget(key, safe_name, size, allow_pause=False)
+            else:
+                logger.info(f"User declined direct transfer of '{safe_name}' from {sender}.")
+        except Exception as e:
+            logger.error(f"Consent prompt failed: {e}; rejecting transfer.")
+            ticket.accepted = False
+        finally:
+            ticket.event.set()  # release the listener thread with whatever we decided
 
     def _send_file_directly(self):
         """Prompt user to select a local file and push it directly to the selected peer."""

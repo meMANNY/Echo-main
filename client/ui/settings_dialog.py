@@ -101,6 +101,10 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Input Error", "Downloads folder path cannot be empty.")
             return
 
+        # Capture the OLD share path BEFORE overwriting it, or the change check
+        # below always compares equal and the watcher/republish never fires.
+        old_share = self.core.settings.get("share_folder_path", "")
+
         # Update settings in core
         self.core.settings["server_ip"] = server_ip
         self.core.settings["share_folder_path"] = share_path
@@ -108,7 +112,6 @@ class SettingsDialog(QDialog):
         self.core.settings["show_notifications"] = show_notifications
         self.core.save_settings(self.core.settings)
         logger.info("Settings updated successfully.")
-        old_share = self.core.settings.get("share_folder_path", "")
 
         if share_path != old_share:
             logger.info("Share folder changed; restarting share watcher.")

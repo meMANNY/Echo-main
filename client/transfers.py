@@ -423,6 +423,9 @@ def handle_incoming_direct_transfer_request(core: "ClientCore", conn: socket.soc
         # downloads folder (4.7.2 saves under this name).
         safe_name = Path(metadata["path"]).name
         sender = core.request_peer_uname(peer_ip) or peer_ip
+        # Tell the consent UI who's asking — the wire metadata (path/size/hash/
+        # compression) doesn't carry the sender; resolve it from the peer IP here.
+        metadata["sender"] = sender
 
         if not core.should_accept_transfer(metadata):
             logger.info(f"Direct transfer of '{safe_name}' from {sender} rejected.")
