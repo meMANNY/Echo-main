@@ -40,3 +40,21 @@ class FileProgressWidget(QWidget):
         h_top.addStretch()
         h_top.addWidget(self.lbl_speed_eta)
         layout.addLayout(h_top)
+
+        # Bottom row: Progress Bar + Pause/Resume Button
+        h_bottom = QHBoxLayout()
+        self.progress_bar = QProgressBar()
+        # Scale to basis points (0-10000) for smooth visual motion
+        self.progress_bar.setMaximum(10000)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat(f"0 B / {convert_size(self.total_size)}")
+        h_bottom.addWidget(self.progress_bar)
+        if self.allow_pause:
+            self.btn_toggle = QPushButton("⏸ Pause" if self.status == TransferStatus.DOWNLOADING else "▶ Resume")
+            self.btn_toggle.setFixedWidth(75)
+            self.btn_toggle.clicked.connect(self._on_toggle_clicked)
+            h_bottom.addWidget(self.btn_toggle)
+        else:
+            self.btn_toggle = None
+        layout.addLayout(h_bottom)
