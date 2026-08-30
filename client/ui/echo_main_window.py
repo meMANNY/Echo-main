@@ -477,4 +477,20 @@ class EchoMainWindow(QMainWindow):
         self.adapter.publish_share_async(
             on_success=lambda: logger.info("Share data auto-republished successfully.")
         )
+
+    def _send_chat_message(self):
+        """Send the message in the input box to the selected peer."""
+        if not self.selected_peer:
+            logger.warning("Attempted to send chat message with no peer selected.")
+            return
+        message = self.chat_input.text().strip()
+        if not message:
+            return  # Don't send empty messages
+        self.adapter.send_chat_async(
+            target_uname=self.selected_peer,
+            text=message,
+            on_success=lambda: self._on_message_sent(self.selected_peer, message),
+            on_error=lambda err: logger.error(f"Failed to send message to {self.selected_peer}: {err}")
+        )
+        self.chat_input.clear()  # Clear input after sending
     
