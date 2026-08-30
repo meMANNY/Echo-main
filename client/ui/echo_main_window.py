@@ -52,6 +52,10 @@ class EchoMainWindow(QMainWindow):
         self.adapter.share_changed.connect(self.trigger_share_rescan)
         self.adapter.start_share_watch()
 
+        # Session 6: without the inbound peer server running, no chat / file /
+        # transfer request can ever reach us.
+        self.adapter.start_peer_listener()
+
 
     def init_ui(self):
         self.setWindowTitle(f"Echo — P2P File Sharing & Chat ({self.adapter.core.settings.get('uname', '')})")
@@ -214,11 +218,12 @@ class EchoMainWindow(QMainWindow):
         self.chat_input.textChanged.connect(self._on_chat_input_changed)
 
     def _connect_adapter_signals(self):
-        """Minimal live bindings that prove the adapter seam end-to-end.
-        Session 4 replaces these with the in-place diff list + full banner."""
+        """Bind every adapter signal to its slot — the one crossing from
+        background threads into the GUI thread."""
         self.adapter.peers_changed.connect(self._on_peers_changed)
         self.adapter.connection_lost.connect(self._on_connection_lost)
         self.adapter.message_received.connect(self._on_message_received)
+        self.adapter.notification.connect(self._on_notification)
 
 
     def _maybe_auto_connect(self):
@@ -517,22 +522,33 @@ class EchoMainWindow(QMainWindow):
     
 
     def _on_message_received(self, msg: dict):
-        """
-        Called on the GUI thread whenever an inbound P2P chat message arrives.
-        """
+        """Inbound P2P chat message (GUI thread). Append it in-app if we're
+        looking at that conversation; either way it's already in
+        core.message_history, so switching to the sender re-renders it. The
+        desktop popup is handled by _on_notification (the listener fires
+        core.notify -> notification signal), so we DON'T notify here — that
+        double-firing was the bug."""
         sender = msg.get("sender", "Unknown")
-        content = msg.get("content", "")
-
-        # If we are currently chatting with the sender, append directly to chat display
         if self.selected_peer == sender:
             from utils.helpers import construct_message_html
             self.chat_display.append(construct_message_html(msg, is_self=False))
             self._scroll_chat_to_bottom()
 
-        # If the window is minimized or inactive, show a desktop notification
-        if not self.isActiveWindow() or self.selected_peer != sender:
-            if self.adapter.core.settings.get("show_notifications", True):
-                self.adapter.core.notify(f"Message from {sender}", content)
+    def _on_notification(self, title: str, body: str):
+        """Route a core notification to a DESKTOP popup ONLY when this window
+        isn't the active one (5.3.7); when it's focused the in-window update is
+        enough. show_notifications was already honored by core.notify()."""
+        if self.isActiveWindow():
+            return
+        try:
+            from notifypy import Notify
+            n = Notify()
+            n.application_name = "Echo"
+            n.title = title
+            n.message = body
+            n.send(block=False)
+        except Exception as e:
+            logger.error(f"Desktop notification failed: {e}")
 
     def _render_chat_history(self, uname: str):
         """ Render full conversation history using rich HTML formatting """

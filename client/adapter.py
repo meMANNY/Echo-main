@@ -1,6 +1,8 @@
 import logging
 from PyQt5.QtCore import QObject, pyqtSignal,QRunnable, QThreadPool,pyqtSlot
 
+from client.peer_listener import PeerListener
+
 # watchdog powers share auto-rescan (5.3.8); kept optional so the app still runs
 # (with rescan disabled) if it isn't installed.
 try:
@@ -55,6 +57,7 @@ class CoreAdapter(QObject):
         self.core = core
         self.thread_pool = QThreadPool()  # Thread pool for managing background workers
         self.share_observer = None  # watchdog Observer watching our share folder (5.3.8)
+        self.peer_listener = None   # inbound peer server (chat / file / transfer requests)
         self._wire_core_callbacks()  # Wire up core callbacks to emit signals to the GUI
 
     def _wire_core_callbacks(self):
@@ -104,6 +107,17 @@ class CoreAdapter(QObject):
             on_success=lambda result: on_done(*result),
             on_error=lambda err: on_done(False, err),
         )
+
+    # --- inbound peer server -------------------------------------------------
+
+    def start_peer_listener(self):
+        """Start the inbound peer server (listens on CLIENT_RECV_PORT for chat,
+        file requests, and direct transfers). Idempotent; without it no inbound
+        P2P — including chat — can ever arrive."""
+        if self.peer_listener is not None:
+            return
+        self.peer_listener = PeerListener(self.core)
+        self.peer_listener.start()
 
     # --- share auto-rescan (5.3.8) ------------------------------------------
 

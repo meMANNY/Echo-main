@@ -397,27 +397,25 @@ class ClientCore:
             peer_sock.close()
 
     def notify(self, title: str, body: str) -> None:
-        """ Thin notification wrapper.
-        If the user has disabled notifications in settings, this method will log"""
+        """Route a notification to whoever is listening.
+
+        Phase 4 fired notify-py here directly; Phase 5 delegates to
+        on_notification so the UI decides HOW and WHEN to surface it (a
+        focus-aware desktop popup vs an in-window cue) — the plan's 5.3.7.
+        Honors show_notifications; never raises into the caller (often a
+        peer-listener worker thread)."""
 
         if not self.settings.get("show_notifications", True):
             logger.debug(f"Notification suppressed (show_notifications off): {title}")
             return
 
-        try:
-            if Notify is not None:
-                notification = Notify()
-                notification.application_name = "Echo"
-                notification.title = title
-                notification.message = body
-                #block=False: don't stall the calling thread on the OS call
-                notification.send(block=False)
-            logger.info(f"[NOTIFY] {title}: {body}")
-            if self.on_notification:
+        logger.info(f"[NOTIFY] {title}: {body}")
+        if self.on_notification:
+            try:
                 self.on_notification(title, body)
-        except Exception as e:
-            #Notification failures are cosmetic — log and move on.
-            logger.error(f"Failed to send desktop notification: {e}")
+            except Exception as e:
+                #A broken UI hook must not crash the listener thread.
+                logger.error(f"Notification hook failed: {e}")
     
     def browse(self,target_uname: str) -> Optional[list[DirData]]:
 
