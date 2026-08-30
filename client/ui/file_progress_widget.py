@@ -58,3 +58,15 @@ class FileProgressWidget(QWidget):
         else:
             self.btn_toggle = None
         layout.addLayout(h_bottom)
+
+    def _on_toggle_clicked(self):
+        if self.status == TransferStatus.DOWNLOADING:
+            self.status = TransferStatus.PAUSED
+            self.btn_toggle.setText("▶ Resume")
+            self.lbl_speed_eta.setText("Pausing...")
+            self.pause_requested.emit(self.transfer_key)
+        else:
+            self.status = TransferStatus.DOWNLOADING
+            self.btn_toggle.setText("⏸ Pause")
+            self.lbl_speed_eta.setText("Resuming...")
+            self.resume_requested.emit(self.transfer_key)
