@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QColor
 from client.ui.file_progress_widget import FileProgressWidget
 from utils.helpers import convert_size
+from client import transfers
 logger = logging.getLogger(__name__)
 
 # ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -57,6 +58,7 @@ class EchoMainWindow(QMainWindow):
         # transfer request can ever reach us.
         self.adapter.start_peer_listener()
         self.adapter.transfer_progress.connect(self._on_transfer_progress)
+        self._restore_journal_transfers()  # 5.4.5: load any in-progress transfers from the journal
 
 
     def init_ui(self):
@@ -207,7 +209,7 @@ class EchoMainWindow(QMainWindow):
         stubs = {
             #self.btn_search: "Search network",
             self.btn_settings: "Open settings",
-            self.btn_download: "Download selected",
+            #self.btn_download: "Download selected",
             #self.btn_file_info: "Show file info",
             #self.btn_refresh_tree: "Refresh tree",
             #self.btn_send_chat: "Send chat",
@@ -219,6 +221,7 @@ class EchoMainWindow(QMainWindow):
         self.chat_input.returnPressed.connect(self._send_chat_message)
         self.chat_input.textChanged.connect(self._on_chat_input_changed)
         self.btn_search.clicked.connect(self._open_search_dialog)
+        self.btn_download.clicked.connect(self._start_download_selected)
 
     def _connect_adapter_signals(self):
         """Bind every adapter signal to its slot — the one crossing from
@@ -595,3 +598,39 @@ class EchoMainWindow(QMainWindow):
                 logger.info(f"Selected peer '{uname}' via Go-To-Owner.")
                 return
         logger.warning(f"Peer '{uname}' not currently found in visible peer list.")
+
+    def _start_download_selected(self):
+        """Initiates a download for the currently selected file in the file tree."""
+        selected_items = self.file_tree.selectedItems()
+        if not selected_items or not self.selected_peer:
+            logger.warning("Download requested but no item is selected or no peer is selected.")
+            return
+        data = selected_items[0].data(0, Qt.UserRole)
+        
+        owner = self.selected_peer
+        remote_path = data.get("path", "")
+        is_dir = data.get("type") == "directory"
+        size = data.get("size", 0)
+
+        transfer_key = transfers._transfer_key(owner, remote_path)
+        self._create_progress_widget(transfer_key,data.get("name"),size)
+
+        if is_dir:
+            self.adapter.run_async(
+                transfers.download_folder,
+                self.adapter.core,
+                owner,
+                data,
+                on_complete=lambda: logger.info(f"Download of {data.get('name')} completed."),
+                on_error=lambda err: logger.error(f"Download of {data.get('name')} failed: {err}")
+            )
+        else:
+            self.adapter.run_async(
+                transfers.download_file,
+                self.adapter.core,
+                owner,
+                remote_path,
+                size,
+                on_complete=lambda: logger.info(f"Download of {data.get('name')} completed."),
+                on_error=lambda err: logger.error(f"Download of {data.get('name')} failed: {err}")
+            )
