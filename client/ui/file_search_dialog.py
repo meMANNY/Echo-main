@@ -103,3 +103,22 @@ class FileSearchDialog(QDialog):
             self.table_results.setItem(row, 3, item_type)
             self.table_results.setItem(row, 4, item_path)
 
+    def on_search_error(self, error_msg: str):
+        self.btn_search.setEnabled(True)
+        self.lbl_status.setText(f"Search failed: {error_msg}")
+        logger.error(f"Search error: {error_msg}")
+    def on_selection_changed(self):
+        selected_rows = self.table_results.selectedItems()
+        self.btn_go_to_owner.setEnabled(len(selected_rows) > 0)
+    def on_go_to_owner_clicked(self):
+        selected_items = self.table_results.selectedItems()
+        if not selected_items:
+            return
+        res = selected_items[0].data(Qt.UserRole)
+        if not res:
+            return
+        owner = res.get("owner")
+        logger.info(f"Navigating to owner: '{owner}' from search result")
+        if self.on_go_to_owner and owner:
+            self.on_go_to_owner(owner)
+            self.accept()
