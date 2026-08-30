@@ -70,3 +70,31 @@ class FileProgressWidget(QWidget):
             self.btn_toggle.setText("⏸ Pause")
             self.lbl_speed_eta.setText("Resuming...")
             self.resume_requested.emit(self.transfer_key)
+
+    def update_progress(self,progress_data: dict):
+        """
+        Update the progress bar and speed/ETA label based on the provided progress data.
+        """
+
+        received = progress_data.get("progress", 0)
+        total = progress_data.get("total", self.total_size)
+        self.status = progress_data.get("status", self.status)
+        # Update basis points value
+        if total > 0:
+            basis_points = int((received / total) * 10000)
+            self.progress_bar.setValue(min(basis_points, 10000))
+            self.progress_bar.setFormat(f"{convert_size(received)} / {convert_size(total)} ({basis_points/100:.1f}%)")
+        # Format Speed and ETA
+        speed_bps = progress_data.get("speed_bps")
+        eta_sec = progress_data.get("eta_seconds")
+        
+        if self.status == TransferStatus.PAUSED:
+            self.lbl_speed_eta.setText("Paused")
+            if self.btn_toggle:
+                self.btn_toggle.setText("▶ Resume")
+        elif speed_bps is not None and speed_bps > 0:
+            speed_str = f"{convert_size(speed_bps)}/s"
+            eta_str = f"{int(eta_sec)}s left" if eta_sec is not None else ""
+            self.lbl_speed_eta.setText(f"{speed_str} | {eta_str}" if eta_str else speed_str)
+            if self.btn_toggle:
+                self.btn_toggle.setText("⏸ Pause")
