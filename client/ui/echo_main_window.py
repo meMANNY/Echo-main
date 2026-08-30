@@ -203,7 +203,7 @@ class EchoMainWindow(QMainWindow):
         """Session 3: every action logs a line until its pane is wired up in a
         later session."""
         stubs = {
-            self.btn_search: "Search network",
+            #self.btn_search: "Search network",
             self.btn_settings: "Open settings",
             self.btn_download: "Download selected",
             #self.btn_file_info: "Show file info",
@@ -216,6 +216,7 @@ class EchoMainWindow(QMainWindow):
         self.btn_send_chat.clicked.connect(self._send_chat_message)
         self.chat_input.returnPressed.connect(self._send_chat_message)
         self.chat_input.textChanged.connect(self._on_chat_input_changed)
+        self.btn_search.clicked.connect(self._open_search_dialog)
 
     def _connect_adapter_signals(self):
         """Bind every adapter signal to its slot — the one crossing from
@@ -569,3 +570,13 @@ class EchoMainWindow(QMainWindow):
         """ Automatically scrolls the chat pane to the newest message """
         scrollbar = self.chat_display.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _open_search_dialog(self):
+        """ Opens the global search modal """
+        from client.ui.file_search_dialog import FileSearchDialog
+        dlg = FileSearchDialog(
+            self.adapter, 
+            on_go_to_owner=self._select_peer_by_name, 
+            parent=self
+        )
+        dlg.exec_()
