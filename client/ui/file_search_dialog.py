@@ -63,3 +63,43 @@ class FileSearchDialog(QDialog):
         h_bottom.addStretch()
         h_bottom.addWidget(self.btn_close)
         layout.addLayout(h_bottom)
+
+    def on_search(self):
+        query = self.input_query.text().strip()
+        if not query:
+            QMessageBox.warning(self, "Input Error", "Please enter a search term.")
+            return
+        self.btn_search.setEnabled(False)
+        self.lbl_status.setText(f"Searching for '{query}'...")
+        self.table_results.setRowCount(0)
+        self.btn_go_to_owner.setEnabled(False)
+        self.adapter.search_async(query, on_success=self.on_search_success, on_error=self.on_search_error)
+
+    def on_search_success(self, results: list):
+        self.btn_search.setEnabled(True)
+        self.results_data = results or []
+        if not self.results_data:
+            self.lbl_status.setText(f"No results found for '{self.input_query.text().strip()}'.")
+            return
+        self.lbl_status.setText(f"Found {len(self.results_data)} match(es):")
+        self.table_results.setRowCount(len(self.results_data))
+        for row, res in enumerate(self.results_data):
+            owner = res.get("owner", "Unknown")
+            data = res.get("data", {})
+            name = data.get("name", "Unknown")
+            size = data.get("size", 0)
+            is_dir = data.get("type") == "directory"
+            path = data.get("path", "/")
+            item_owner = QTableWidgetItem(owner)
+            item_name = QTableWidgetItem(name)
+            item_size = QTableWidgetItem("—" if is_dir else convert_size(size))
+            item_type = QTableWidgetItem("Folder" if is_dir else "File")
+            item_path = QTableWidgetItem(path)
+            # Store the full result dict on column 0 for retrieval
+            item_owner.setData(Qt.UserRole, res)
+            self.table_results.setItem(row, 0, item_owner)
+            self.table_results.setItem(row, 1, item_name)
+            self.table_results.setItem(row, 2, item_size)
+            self.table_results.setItem(row, 3, item_type)
+            self.table_results.setItem(row, 4, item_path)
+
