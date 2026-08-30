@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QColor
 from client.ui.file_progress_widget import FileProgressWidget
 from utils.helpers import convert_size
+from utils.types import TransferStatus
 from client import transfers
 logger = logging.getLogger(__name__)
 
@@ -634,3 +635,18 @@ class EchoMainWindow(QMainWindow):
                 on_complete=lambda: logger.info(f"Download of {data.get('name')} completed."),
                 on_error=lambda err: logger.error(f"Download of {data.get('name')} failed: {err}")
             )
+
+    def _create_progress_widget(self, key: str, filename: str, total_size: int, initial_status = TransferStatus.DOWNLOADING):
+        if key in self._progress_widgets:
+            logger.warning(f"Progress widget for {key} already exists. Skipping creation.")
+            return self._progress_widgets[key]
+
+        from client.ui.file_progress_widget import FileProgressWidget
+        widget = FileProgressWidget(key,filename, total_size, initial_status = initial_status)
+        widget.pause_requested.connect(self._pause_download)
+        widget.resume_requested.connect(self._resume_download)
+
+        self.transfers_layout.insertWidget(0,widget)
+        self._progress_widgets[key] = widget
+        return widget
+    
