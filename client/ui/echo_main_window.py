@@ -533,3 +533,23 @@ class EchoMainWindow(QMainWindow):
         if not self.isActiveWindow() or self.selected_peer != sender:
             if self.adapter.core.settings.get("show_notifications", True):
                 self.adapter.core.notify(f"Message from {sender}", content)
+
+    def _render_chat_history(self, uname: str):
+        """ Render full conversation history using rich HTML formatting """
+        self.chat_display.clear()
+        history = self.adapter.core.message_history.get(uname, [])
+        my_uname = self.adapter.core.settings.get("uname", "")
+
+        from utils.helpers import construct_message_html
+        html_blocks = []
+        for m in history:
+            is_self = m.get("sender") == my_uname or m.get("sender") == "You"
+            html_blocks.append(construct_message_html(m, is_self=is_self))
+
+        self.chat_display.setHtml("".join(html_blocks))
+        self._scroll_chat_to_bottom()
+
+    def _scroll_chat_to_bottom(self):
+        """ Automatically scrolls the chat pane to the newest message """
+        scrollbar = self.chat_display.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
