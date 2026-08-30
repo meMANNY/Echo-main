@@ -580,3 +580,16 @@ class EchoMainWindow(QMainWindow):
             parent=self
         )
         dlg.exec_()
+
+    def _select_peer_by_name(self, uname: str):
+        """
+        Selects uname in the user list and triggers a browse.
+        Called when 'Go to Owner' is triggered from the search modal.
+        """
+        for i in range(self.user_list.count()):
+            item = self.user_list.item(i)
+            if item.data(Qt.UserRole) == uname:
+                self.user_list.setCurrentItem(item)
+                logger.info(f"Selected peer '{uname}' via Go-To-Owner.")
+                return
+        logger.warning(f"Peer '{uname}' not currently found in visible peer list.")
