@@ -74,3 +74,47 @@ class SettingsDialog(QDialog):
         h_buttons.addWidget(self.btn_save)
         h_buttons.addWidget(self.btn_cancel)
         layout.addLayout(h_buttons)
+
+    def _browse_share(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Share Folder", self.input_share.text())
+        if folder:
+            self.input_share.setText(folder)
+
+    def _browse_dl(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Downloads Folder", self.input_dl.text())
+        if folder:
+            self.input_dl.setText(folder)
+
+    def _save_settings(self):
+        server_ip = self.input_server_ip.text().strip()
+        share_path = self.input_share.text().strip()
+        dl_path = self.input_dl.text().strip()
+        show_notifications = self.chk_notifications.isChecked()
+
+        if not server_ip:
+            QMessageBox.warning(self, "Input Error", "Server IP address cannot be empty.")
+            return
+        if not share_path:
+            QMessageBox.warning(self, "Input Error", "Share folder path cannot be empty.")
+            return
+        if not dl_path:
+            QMessageBox.warning(self, "Input Error", "Downloads folder path cannot be empty.")
+            return
+
+        # Update settings in core
+        self.core.settings["server_ip"] = server_ip
+        self.core.settings["share_folder_path"] = share_path
+        self.core.settings["downloads_folder_path"] = dl_path
+        self.core.settings["show_notifications"] = show_notifications
+        self.core.save_settings(self.core.settings)
+        logger.info("Settings updated successfully.")
+        old_share = self.core.settings.get("share_folder_path", "")
+
+        if share_path != old_share:
+            logger.info("Share folder changed; restarting share watcher.")
+            self.adapter.stop_share_watch()
+            self.adapter.start_share_watch()
+            self.adapter.publish_share_async(
+                on_success = lambda: logger.info("Share data published after folder change."),
+            )
+        self.accept()
