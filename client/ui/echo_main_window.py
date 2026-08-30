@@ -513,4 +513,23 @@ class EchoMainWindow(QMainWindow):
         is_valid = 0 < byte_len <= 256
         is_online = self.selected_peer and self.selected_peer in self.adapter.core.online_peers 
         self.btn_send_chat.setEnabled(bool(text.strip()) and is_valid and is_online)
-        
+
+    
+
+    def _on_message_received(self, msg: dict):
+        """
+        Called on the GUI thread whenever an inbound P2P chat message arrives.
+        """
+        sender = msg.get("sender", "Unknown")
+        content = msg.get("content", "")
+
+        # If we are currently chatting with the sender, append directly to chat display
+        if self.selected_peer == sender:
+            from utils.helpers import construct_message_html
+            self.chat_display.append(construct_message_html(msg, is_self=False))
+            self._scroll_chat_to_bottom()
+
+        # If the window is minimized or inactive, show a desktop notification
+        if not self.isActiveWindow() or self.selected_peer != sender:
+            if self.adapter.core.settings.get("show_notifications", True):
+                self.adapter.core.notify(f"Message from {sender}", content)
