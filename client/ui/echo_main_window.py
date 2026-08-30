@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QDesktopWidget, QListWidgetItem
 )
 from PyQt5.QtGui import QColor
+from client.ui.file_progress_widget import FileProgressWidget
 from utils.helpers import convert_size
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class EchoMainWindow(QMainWindow):
         self.file_tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self.btn_refresh_tree.clicked.connect(self._refresh_current_tree)
         self.btn_file_info.clicked.connect(self._open_file_info)
-        
+        self._progress_widgets: dict[str, FileProgressWidget] = {}  # transfer_key -> widget
         self._rescan_timer = QTimer(self)
         self._rescan_timer.setSingleShot(True)
         self._rescan_timer.setInterval(2000)  # 2-second quiet period
@@ -55,6 +56,7 @@ class EchoMainWindow(QMainWindow):
         # Session 6: without the inbound peer server running, no chat / file /
         # transfer request can ever reach us.
         self.adapter.start_peer_listener()
+        self.adapter.transfer_progress.connect(self._on_transfer_progress)
 
 
     def init_ui(self):

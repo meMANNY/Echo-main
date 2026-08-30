@@ -5,7 +5,7 @@ from utils.helpers import convert_size
 from utils.types import TransferStatus
 logger = logging.getLogger(__name__)
 
-class FileProgressWidget(QWidget):
+class FileProgressWidget(QFrame):
     """
     A single download progress row in the transfer pane.
     Displays filename, speed/ETA, progress bar and pause/resume button.
