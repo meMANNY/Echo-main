@@ -211,22 +211,23 @@ class EchoMainWindow(QMainWindow):
     def _wire_stub_actions(self):
         """Session 3: every action logs a line until its pane is wired up in a
         later session."""
-        stubs = {
-            #self.btn_search: "Search network",
-            self.btn_settings: "Open settings",
-            #self.btn_download: "Download selected",
-            #self.btn_file_info: "Show file info",
-            #self.btn_refresh_tree: "Refresh tree",
-            #self.btn_send_chat: "Send chat",
-        }
-        for btn, label in stubs.items():
-            btn.clicked.connect(lambda _=False, l=label: logger.info(f"[stub] {l} clicked"))
+        # stubs = {
+        #     #self.btn_search: "Search network",
+        #     self.btn_settings: "Open settings",
+        #     #self.btn_download: "Download selected",
+        #     #self.btn_file_info: "Show file info",
+        #     #self.btn_refresh_tree: "Refresh tree",
+        #     #self.btn_send_chat: "Send chat",
+        # }
+        # for btn, label in stubs.items():
+        #     btn.clicked.connect(lambda _=False, l=label: logger.info(f"[stub] {l} clicked"))
         self.btn_reconnect.clicked.connect(self._begin_connect)
         self.btn_send_chat.clicked.connect(self._send_chat_message)
         self.chat_input.returnPressed.connect(self._send_chat_message)
         self.chat_input.textChanged.connect(self._on_chat_input_changed)
         self.btn_search.clicked.connect(self._open_search_dialog)
         self.btn_download.clicked.connect(self._start_download_selected)
+        self.btn_settings.clicked.connect(self._open_settings_dialog)
 
     def _connect_adapter_signals(self):
         """Bind every adapter signal to its slot — the one crossing from
@@ -270,6 +271,13 @@ class EchoMainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error closing server connection: {e}")
         event.accept()
+    
+
+    def _open_settings_dialog(self):
+        """ Opens the Settings dialog """
+        from client.ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self.adapter, parent=self)
+        dlg.exec_()
 
     def _on_peers_changed(self,online_dict: dict):
         """
