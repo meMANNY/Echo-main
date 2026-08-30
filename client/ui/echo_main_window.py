@@ -11,8 +11,11 @@ from PyQt5.QtGui import QColor
 from client.ui.file_progress_widget import FileProgressWidget
 from utils.helpers import convert_size
 from utils.types import TransferStatus
+from typing import TYPE_CHECKING
 from client import transfers
 logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from client.adapter import CoreAdapter
 
 # ┌────────────────────────────────────────────────────────────────────────────────────────┐
 # │  👤 alice  │  ● Connected (127.0.0.1)  │  [Reconnect]     [🔍 Search]   [⚙ Settings]  │
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 # └─────────────────────┴────────────────────────────────────┴─────────────────────────────┘
 
 class EchoMainWindow(QMainWindow):
-    def __init__(self,adapter):
+    def __init__(self,adapter: "CoreAdapter"):
         super().__init__()
         self.adapter = adapter
         self.selected_peer = None
@@ -57,9 +60,8 @@ class EchoMainWindow(QMainWindow):
 
         # Session 6: without the inbound peer server running, no chat / file /
         # transfer request can ever reach us.
-        
+
         self.adapter.start_peer_listener()
-        self.adapter.transfer_progress.connect(self._on_transfer_progress)
         self._restore_journal_transfers()  # 5.4.5: load any in-progress transfers from the journal
 
 
@@ -241,7 +243,6 @@ class EchoMainWindow(QMainWindow):
         the first paint."""
         if not self.adapter.core.connected:
             self._begin_connect()
-
     def _begin_connect(self):
         s = self.adapter.core.settings
         self.lbl_status.setText("● Connecting…")
@@ -613,7 +614,7 @@ class EchoMainWindow(QMainWindow):
         owner = self.selected_peer
         remote_path = data.get("path", "")
         is_dir = data.get("type") == "directory"
-        size = data.get("size", 0)
+        size = data.get("size") or 0  # directories carry size=None; coerce so the widget/convert_size don't choke
 
         transfer_key = transfers._transfer_key(owner, remote_path)
         self._create_progress_widget(transfer_key,data.get("name"),size)
@@ -621,21 +622,16 @@ class EchoMainWindow(QMainWindow):
         if is_dir:
             self.adapter.run_async(
                 transfers.download_folder,
-                self.adapter.core,
-                owner,
-                data,
-                on_complete=lambda: logger.info(f"Download of {data.get('name')} completed."),
-                on_error=lambda err: logger.error(f"Download of {data.get('name')} failed: {err}")
+                lambda ok: self._on_download_complete(transfer_key, ok),
+                lambda err: self._on_download_error(transfer_key, err),
+                self.adapter.core, owner, data,
             )
         else:
             self.adapter.run_async(
                 transfers.download_file,
-                self.adapter.core,
-                owner,
-                remote_path,
-                size,
-                on_complete=lambda: logger.info(f"Download of {data.get('name')} completed."),
-                on_error=lambda err: logger.error(f"Download of {data.get('name')} failed: {err}")
+                lambda ok: self._on_download_complete(transfer_key, ok),
+                lambda err: self._on_download_error(transfer_key, err),
+                self.adapter.core, owner, remote_path, size,
             )
 
     def _create_progress_widget(self, key: str, filename: str, total_size: int, initial_status = TransferStatus.DOWNLOADING):
@@ -679,9 +675,9 @@ class EchoMainWindow(QMainWindow):
 
         self.adapter.run_async(
             transfers.resume_download,
-            self.adapter.core, owner,meta,
-            on_success = lambda ok:self._on_download_complete(key,ok),
-            on_error = lambda err: self._on_download_error(key,err),
+            lambda ok: self._on_download_complete(key, ok),
+            lambda err: self._on_download_error(key, err),
+            self.adapter.core, owner, meta,
         )
 
     def _on_download_complete(self, key: str, success: bool):
@@ -698,11 +694,11 @@ class EchoMainWindow(QMainWindow):
         """ Pre-creates PAUSED rows for any incomplete downloads found in the journal """
         resumable = self.adapter.core.get_resumable_transfers()
         for entry in resumable:
-            owner = entry.get("owner", "unknown")
+            owner = entry.get("uname", "unknown")
             filepath = entry.get("filepath", "")
             key = f"{owner}:{filepath}"
-            size = entry.get("filesize", 0)
-            received = entry.get("received_bytes", 0)
+            size = entry.get("total", 0)
+            received = entry.get("received", 0)
             
             w = self._create_progress_widget(key, filepath, size, initial_status=TransferStatus.PAUSED)
             w.update_progress({"progress": received, "total": size, "status": TransferStatus.PAUSED})
