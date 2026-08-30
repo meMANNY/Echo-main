@@ -15,7 +15,7 @@ class FileProgressWidget(QFrame):
     resume_requested = pyqtSignal(str)  # Signal emitted when resume is requested, with file hash
 
     def __init__(self,transfer_key: str, filename: str,total_size:int,
-                initial_status: TransferStatus.DOWNLOADING, allow_pause: bool = True, parent=None):
+                initial_status= TransferStatus.DOWNLOADING, allow_pause: bool = True, parent=None):
         super().__init__(parent)
         self.transfer_key = transfer_key
         self.filename = filename

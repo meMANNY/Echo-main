@@ -57,6 +57,7 @@ class EchoMainWindow(QMainWindow):
 
         # Session 6: without the inbound peer server running, no chat / file /
         # transfer request can ever reach us.
+        
         self.adapter.start_peer_listener()
         self.adapter.transfer_progress.connect(self._on_transfer_progress)
         self._restore_journal_transfers()  # 5.4.5: load any in-progress transfers from the journal
@@ -231,6 +232,7 @@ class EchoMainWindow(QMainWindow):
         self.adapter.connection_lost.connect(self._on_connection_lost)
         self.adapter.message_received.connect(self._on_message_received)
         self.adapter.notification.connect(self._on_notification)
+        self.adapter.transfer_progress.connect(self._on_transfer_progress)
 
 
     def _maybe_auto_connect(self):
@@ -649,4 +651,58 @@ class EchoMainWindow(QMainWindow):
         self.transfers_layout.insertWidget(0,widget)
         self._progress_widgets[key] = widget
         return widget
-    
+
+    def _on_transfer_progress(self, key: str,progress_data: dict):
+        """
+        Called every 16kb chunk tick on the GUI thread. Updates the corresponding progress widget.
+        """
+
+        widget = self._progress_widgets.get(key)
+        if not widget:
+            logger.warning(f"Received progress update for unknown transfer key: {key}")
+            return
+
+        widget.update_progress(progress_data)
+
+    def _pause_download(self, key: str):
+        logger.info(f"Pause requested for transfer {key}")
+        self.adapter.core.pause_transfer(key)
+
+    def _resume_download(self, key: str):
+        logger.info(f"Resume requested for transfer {key}")
+        owner,remote_path = key.split(":",1)
+
+        rec = self.adapter.core.get_transfer(key)
+        total_size = rec.get("total",0) if rec else 0
+
+        meta = {"path": remote_path, "size": total_size, "hash": None}
+
+        self.adapter.run_async(
+            transfers.resume_download,
+            self.adapter.core, owner,meta,
+            on_success = lambda ok:self._on_download_complete(key,ok),
+            on_error = lambda err: self._on_download_error(key,err),
+        )
+
+    def _on_download_complete(self, key: str, success: bool):
+        if success:
+            logger.info(f"Download completed successfully for {key}")
+            # Optionally remove row after a brief delay or leave as 100% complete
+        else:
+            logger.error(f"Download failed for {key}")
+    def _on_download_error(self, key: str, err_msg: str):
+        logger.error(f"Download worker error for {key}: {err_msg}")
+        from client.ui.error_dialog import ErrorDialog
+        ErrorDialog(f"Download error: {err_msg}", parent=self).exec_()
+    def _restore_journal_transfers(self):
+        """ Pre-creates PAUSED rows for any incomplete downloads found in the journal """
+        resumable = self.adapter.core.get_resumable_transfers()
+        for entry in resumable:
+            owner = entry.get("owner", "unknown")
+            filepath = entry.get("filepath", "")
+            key = f"{owner}:{filepath}"
+            size = entry.get("filesize", 0)
+            received = entry.get("received_bytes", 0)
+            
+            w = self._create_progress_widget(key, filepath, size, initial_status=TransferStatus.PAUSED)
+            w.update_progress({"progress": received, "total": size, "status": TransferStatus.PAUSED})
