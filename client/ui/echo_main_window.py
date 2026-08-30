@@ -177,12 +177,15 @@ class EchoMainWindow(QMainWindow):
         self.btn_download = QPushButton("Download")
         self.btn_file_info = QPushButton("File Info")
         self.btn_refresh_tree = QPushButton("Refresh")
+        self.btn_send_file_direct = QPushButton("Send File Directly")
         self.btn_download.setEnabled(False)
         self.btn_file_info.setEnabled(False)
         self.btn_refresh_tree.setEnabled(False)
+        self.btn_send_file_direct.setEnabled(False)
         h_buttons.addWidget(self.btn_download)
         h_buttons.addWidget(self.btn_file_info)
         h_buttons.addWidget(self.btn_refresh_tree)
+        h_buttons.addWidget(self.btn_send_file_direct)
         layout.addLayout(h_buttons)
         # Divider
         divider = QFrame()
@@ -228,6 +231,7 @@ class EchoMainWindow(QMainWindow):
         self.btn_search.clicked.connect(self._open_search_dialog)
         self.btn_download.clicked.connect(self._start_download_selected)
         self.btn_settings.clicked.connect(self._open_settings_dialog)
+        self.btn_send_file_direct.clicked.connect(self._send_file_directly)
 
     def _connect_adapter_signals(self):
         """Bind every adapter signal to its slot — the one crossing from
@@ -350,6 +354,7 @@ class EchoMainWindow(QMainWindow):
         #self.btn_download.setEnabled(is_online)
         #self.btn_file_info.setEnabled(is_online)
         self.btn_refresh_tree.setEnabled(is_online)
+        self.btn_send_file_direct.setEnabled(is_online)
         self.chat_input.setPlaceholderText("Type a message..." if is_online else f"{self.selected_peer} is offline")
 
     def _disable_all_peer_controls(self):
@@ -359,6 +364,7 @@ class EchoMainWindow(QMainWindow):
         self.btn_download.setEnabled(False)
         self.btn_file_info.setEnabled(False)
         self.btn_refresh_tree.setEnabled(False)
+        self.btn_send_file_direct.setEnabled(False)
         self.lbl_chat_header.setText("<i>Select a user to chat</i>")
         #self.lbl_files_header.setText("<b>Shared Files</b>")
         self.chat_display.clear()
@@ -822,3 +828,33 @@ class EchoMainWindow(QMainWindow):
             logger.info(f"User declined direct transfer of '{filename}' from {sender}.")
 
         return accepted
+
+    def _send_file_directly(self):
+        """Prompt user to select a local file and push it directly to the selected peer."""
+        if not self.selected_peer or self.selected_peer not in self.adapter.core.online_peers:
+            logger.warning("Attempted to send file directly with no peer selected or peer offline.")
+            return
+
+        from PyQt5.QtWidgets import QFileDialog
+        from pathlib import Path
+        file_path, _ = QFileDialog.getOpenFileName(self, f"Send File Directly to {self.selected_peer}")
+        if not file_path:
+            return
+
+        p = Path(file_path)
+        if not p.is_file():
+            return
+
+        owner = self.selected_peer
+        size = p.stat().st_size
+
+        from client import transfers
+        key = transfers._transfer_key(owner, p.name)
+        self._create_progress_widget(key, p.name, size, allow_pause=False)
+
+        self.adapter.run_async(
+            transfers.send_direct_transfer,
+            lambda ok: self._on_download_complete(key, ok),
+            lambda err: self._on_download_error(key, err),
+            self.adapter.core, owner, file_path
+        )
