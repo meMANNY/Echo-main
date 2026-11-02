@@ -46,7 +46,7 @@ def main():
     window.center_on_screen()
     window.show()
 
-    # start the event loop
+    # start the event loop ok
     sys.exit(app.exec_())
 
 
