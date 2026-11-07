@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 from pathlib import Path
@@ -46,8 +47,20 @@ def main():
     window.center_on_screen()
     window.show()
 
-    # start the event loop ok
-    sys.exit(app.exec_())
+    code = app.exec_()
+
+    # The main window's closeEvent already ran this; it's idempotent, and it
+    # also covers quitting from the first-run windows (5.4.5).
+    adapter.shutdown()
+    # A pool worker still blocked in a socket call (e.g. a push waiting on the
+    # other side's consent dialog) would make QThreadPool's destructor wait for
+    # it at interpreter exit. Everything worth keeping (settings, journal) is
+    # already on disk, so don't let it hold the process open.
+    if adapter.transfer_pool.activeThreadCount() or adapter.thread_pool.activeThreadCount():
+        logger.warning("Background workers still busy at exit; exiting without waiting for them.")
+        logging.shutdown()
+        os._exit(code)
+    sys.exit(code)
 
 
 if __name__ == "__main__":

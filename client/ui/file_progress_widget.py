@@ -1,7 +1,7 @@
 import logging
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QFrame
-from utils.helpers import convert_size
+from utils.helpers import convert_size, format_speed, format_eta
 from utils.types import TransferStatus
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,10 @@ class FileProgressWidget(QFrame):
         self.total_size = total_size
         self.status = initial_status
         self.allow_pause = allow_pause
+        # True between a Pause click and the worker confirming it has exited.
+        # Resume stays disabled meanwhile: resuming while the old worker is
+        # still mid-chunk would put two writers on the same temp file.
+        self._awaiting_pause_ack = False
         self.init_ui()
 
     def init_ui(self):
@@ -62,7 +66,9 @@ class FileProgressWidget(QFrame):
     def _on_toggle_clicked(self):
         if self.status == TransferStatus.DOWNLOADING:
             self.status = TransferStatus.PAUSED
+            self._awaiting_pause_ack = True
             self.btn_toggle.setText("▶ Resume")
+            self.btn_toggle.setEnabled(False)  # re-enabled by pause_acknowledged()
             self.lbl_speed_eta.setText("Pausing...")
             self.pause_requested.emit(self.transfer_key)
         else:
@@ -103,14 +109,38 @@ class FileProgressWidget(QFrame):
             if self.btn_toggle:
                 self.btn_toggle.setEnabled(False)
         elif self.status == TransferStatus.PAUSED:
-            self.lbl_speed_eta.setText("Paused")
+            self.lbl_speed_eta.setText("Pausing..." if self._awaiting_pause_ack else "Paused")
+            self.lbl_speed_eta.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+            if self.btn_toggle:
+                self.btn_toggle.setEnabled(not self._awaiting_pause_ack)
+                self.btn_toggle.setText("▶ Resume")
+        elif speed_bps is not None and speed_bps > 0:
+            # Improvement G: speed/ETA are computed (EMA-smoothed) in core; the
+            # widget only formats them, via the shared helpers.
+            eta_str = f"{format_eta(eta_sec)} left" if eta_sec is not None else ""
+            speed_str = format_speed(speed_bps)
+            self.lbl_speed_eta.setText(f"{speed_str} | {eta_str}" if eta_str else speed_str)
             self.lbl_speed_eta.setStyleSheet("color: #7f8c8d; font-size: 11px;")
             if self.btn_toggle:
                 self.btn_toggle.setEnabled(True)
-                self.btn_toggle.setText("▶ Resume")
-        elif speed_bps is not None and speed_bps > 0:
-            speed_str = f"{convert_size(speed_bps)}/s"
-            eta_str = f"{int(eta_sec)}s left" if eta_sec is not None else ""
-            self.lbl_speed_eta.setText(f"{speed_str} | {eta_str}" if eta_str else speed_str)
-            if self.btn_toggle:
                 self.btn_toggle.setText("⏸ Pause")
+
+    def set_note(self, text: str, color: str = "#7f8c8d"):
+        """Show a short state note in place of speed/ETA (e.g. 'Waiting for bob
+        to accept…', 'Declined by bob', 'bob is offline')."""
+        self.lbl_speed_eta.setText(text)
+        self.lbl_speed_eta.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    def pause_acknowledged(self):
+        """The download worker has exited after a pause — Resume is safe now."""
+        self.revert_to_paused()
+
+    def revert_to_paused(self, note: str = ""):
+        """Show a settled PAUSED row: after a confirmed pause, or to undo an
+        optimistic Resume click that couldn't actually start."""
+        self._awaiting_pause_ack = False
+        self.status = TransferStatus.PAUSED
+        if self.btn_toggle:
+            self.btn_toggle.setEnabled(True)
+            self.btn_toggle.setText("▶ Resume")
+        self.set_note(note or "Paused")

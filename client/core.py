@@ -61,6 +61,10 @@ class ClientCore:
         # transport-failure teardown lives in one place instead of every caller.
         self.server = ServerConnection()
         self._registered: bool = False  # True only after a successful register()
+        # Why the most recent register() failed (None after a success). register()
+        # keeps its plain bool contract; the UI reads this to tell "username
+        # taken" (let them rename) apart from a dead connection.
+        self.last_register_error: Optional[ExceptionCodes] = None
 
         #Peer tracking
         self.online_peers: dict[str, float] = {}  # Maps online peer uname -> last_seen timestamp
@@ -199,8 +203,10 @@ class ClientCore:
     def register(self, username: str) -> bool:
         """ Performs the new connection registration with the server. Returns True if successful, False otherwise. """
 
+        self.last_register_error = None
         if not self.server.is_open:
             logger.error("Cannot register: No server connection established.")
+            self.last_register_error = ExceptionCodes.DISCONNECT
             return False
 
         try:
@@ -215,13 +221,16 @@ class ClientCore:
                 return True
 
             logger.error(f"Unexpected response from server during registration: {response}")
+            self.last_register_error = ExceptionCodes.INVALID_HEADER
             return False
 
         except RequestException as e:
+            self.last_register_error = e.code
             if e.code == ExceptionCodes.USER_EXISTS:
                 logger.warning(f"Registration failed: Username '{username}' already taken by another host.")
             elif e.code == ExceptionCodes.BAD_REQUEST:
                 #reconnection (same host re-registering) — socket is still good.
+                self.last_register_error = None
                 self.settings["uname"] = username
                 self.save_settings(self.settings)  # Persist the new username
                 self._registered = True
@@ -238,6 +247,7 @@ class ClientCore:
         except OSError as e:
             #ServerConnection already tore the socket down.
             logger.error(f"Registration failed due to socket error: {e}", exc_info=True)
+            self.last_register_error = ExceptionCodes.DISCONNECT
             return False
 
     def publish_share_data(self) -> bool:
@@ -575,8 +585,11 @@ class ClientCore:
         if emit_payload is not None and self.on_transfer_progress:
             self.on_transfer_progress(key, emit_payload)
 
-    def set_transfer_status(self,key: str, status: TransferStatus) -> None:
-        """Update the status of an active transfer."""
+    def set_transfer_status(self,key: str, status: TransferStatus,
+                            reason: Optional[str] = None) -> None:
+        """Update the status of an active transfer. `reason` is an optional
+        short machine-readable tag for a terminal state (e.g. "declined" when a
+        direct-transfer recipient says no) so the UI can word the outcome."""
 
         with self.transfer_lock:
             rec = self.transfer_progress.get(key)
@@ -584,6 +597,8 @@ class ClientCore:
                 logger.warning(f"Attempted to set status for non-existent transfer '{key}'.")
                 return
             rec["status"] = status
+            if reason is not None:
+                rec["reason"] = reason
             snapshot = dict(rec)
         if status == TransferStatus.COMPLETED:
             self.journal_remove(key)
@@ -631,6 +646,25 @@ class ClientCore:
         logger.info(f"Transfer '{key}' paused.")
         return True
 
+
+    def pause_active_downloads(self) -> list[str]:
+        """Pause every journaled download that is still streaming (shutdown,
+        5.4.5). Each worker sees its cleared event on the next chunk and exits
+        WITHOUT writing the journal again, so the PAUSED status recorded here is
+        the last write — no race with a dying worker. Inbound pushes aren't
+        journaled (nothing to resume into), so they're left alone. Returns the
+        keys that were paused."""
+        with self.journal_lock:
+            journaled = [k for k, e in self.journal.items()
+                         if e.get("status") == TransferStatus.DOWNLOADING.value]
+        paused = []
+        for key in journaled:
+            with self.transfer_lock:
+                rec = self.transfer_progress.get(key)
+                streaming = rec is not None and rec["status"] == TransferStatus.DOWNLOADING
+            if streaming and self.pause_transfer(key):
+                paused.append(key)
+        return paused
 
     def is_transfer_paused(self,key: str) -> bool:
         """Check if an active transfer is paused"""

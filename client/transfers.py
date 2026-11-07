@@ -191,7 +191,11 @@ def handle_incoming_file_request(core: "ClientCore", conn: socket.socket, peer_i
         request_hash = req.get("request_hash", False)
         resume_offset = req.get("resume_offset",0)
 
-        share_root = SHARE_FOLDER_PATH.resolve()
+        # Serve from the share folder the user actually configured — the same
+        # root publish_share_data indexes. Using the SHARE_FOLDER_PATH default
+        # here meant any non-default share folder published fine but every
+        # download from it was rejected as an invalid path.
+        share_root = Path(core.settings.get("share_folder_path") or SHARE_FOLDER_PATH).resolve()
         requested_file = (share_root / rel_path).resolve()
 
         if not requested_file.is_relative_to(share_root) or not requested_file.is_file():
@@ -356,6 +360,12 @@ def send_direct_transfer(core: "ClientCore", target_uname: str, local_path: str)
         "compression": CompressionMethod.NONE.value,
     }
 
+    # Track the push on the SENDER side too (keyed target:name), so the UI's
+    # progress row moves and can tell "declined" apart from a failure. Not
+    # journaled — a push is never resumed.
+    transfer_key = _transfer_key(target_uname, file_path.name)
+    core.start_transfer(transfer_key, total=metadata["size"], received=0)
+
     peer_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     peer_sock.settimeout(5.0)
     try:
@@ -373,6 +383,7 @@ def send_direct_transfer(core: "ClientCore", target_uname: str, local_path: str)
             # is sent here; we push exactly `size` bytes (mirrors how
             # handle_incoming_file_request streams a file back to a requester).
             remaining = metadata["size"]
+            sent = 0
             with open(file_path, "rb") as f:
                 while remaining > 0:
                     chunk = f.read(min(FILE_BUFFER_LEN, remaining))
@@ -380,23 +391,31 @@ def send_direct_transfer(core: "ClientCore", target_uname: str, local_path: str)
                         # File shrank since we stat()'d it: the receiver will
                         # error on the short read and discard its partial.
                         logger.error(f"'{file_path.name}' ended {remaining} bytes early; aborting send.")
+                        core.set_transfer_status(transfer_key, TransferStatus.FAILED, reason="short_read")
                         return False
                     peer_sock.sendall(chunk)
                     remaining -= len(chunk)
+                    sent += len(chunk)
+                    core.update_transfer(transfer_key, received=sent)
+            core.set_transfer_status(transfer_key, TransferStatus.COMPLETED)
             logger.info(f"Finished sending '{file_path.name}' ({metadata['size']} bytes) to {target_uname}.")
             return True
 
         logger.error(f"Unexpected reply to direct-transfer request: {reply['type']}")
+        core.set_transfer_status(transfer_key, TransferStatus.FAILED, reason="bad_reply")
         return False
 
     except RequestException as e:
         if e.code == ExceptionCodes.UNAUTHORIZED:
             logger.info(f"{target_uname} declined the transfer of '{file_path.name}'.")
+            core.set_transfer_status(transfer_key, TransferStatus.FAILED, reason="declined")
         else:
             logger.error(f"Direct-transfer request to {target_uname} failed: {e.msg}")
+            core.set_transfer_status(transfer_key, TransferStatus.FAILED, reason="error")
         return False
     except OSError as e:
         logger.error(f"Failed to reach {target_uname} at {target_ip}: {e}")
+        core.set_transfer_status(transfer_key, TransferStatus.FAILED, reason="unreachable")
         return False
     finally:
         peer_sock.close()

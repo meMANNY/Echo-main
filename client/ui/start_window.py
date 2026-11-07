@@ -4,9 +4,20 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QLineEdit, QHBoxLayout,QMessageBox
 )
 
-from client.ui.basic_config_window import BasicConfigWindow
-
 logger = logging.getLogger(__name__)
+
+
+def validate_username(username: str):
+    """Client-side username check shared by the first-run windows (5.2.1).
+    Returns an error message, or None if the name is acceptable. The server
+    still has the final say (USER_EXISTS); this just fails fast and politely."""
+    if not username:
+        return "Username cannot be empty."
+    if any(ch.isspace() for ch in username):
+        return "Username cannot contain spaces."
+    if ":" in username:
+        return "Username cannot contain ':'."  # ':' separates owner:path in transfer keys
+    return None
 
 class StartWindow(QWidget):
     def __init__(self, adapter):
@@ -57,18 +68,15 @@ class StartWindow(QWidget):
 
     def on_continue(self):
         username = self.uname_input.text().strip()
-        if not username:
-            self.error_label.setText("Username cannot be empty.")
+        error = validate_username(username)
+        if error:
+            self.error_label.setText(error)
             return
-
-        if " " in username:
-            self.error_label.setText("Username cannot contain spaces.")
-            return
-
 
         # If all validations pass, proceed to the next window
         self.error_label.setText("")  # Clear any previous error messages
         logger.info(f"Username '{username}' accepted. Proceeding to basic configuration window.")
+        from client.ui.basic_config_window import BasicConfigWindow
         self.config_window = BasicConfigWindow(self.adapter, username)
         self.config_window.show()
         self.close()  # Close the start window after opening the basic config window
